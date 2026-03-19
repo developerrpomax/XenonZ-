@@ -70,7 +70,7 @@ end
 local Window = Rayfield:CreateWindow({
     Name="XenonZ", Icon=0,
     LoadingTitle="XenonZ is the best",
-    LoadingSubtitle="Best script eva",
+    LoadingSubtitle="Delta X | Gloop Engine",
     Theme="BloodMoon",
     DisableRayfieldPrompts=false,
     DisableBuildWarnings=true,
@@ -2343,6 +2343,9 @@ local function getAbilityRemote(): RemoteEvent?
     return _cachedRemote
 end
 
+-- forward declaration so fireAbility can reference it before the full module is built
+local Aimbot = {}
+
 local function fireAbility(t: string)
     local rem = getAbilityRemote(); if not rem then return end
     local buf = BUFFERS[t] or BUFFERS.Block
@@ -2452,6 +2455,12 @@ local TRIGGER_SOUNDS: { [string]: boolean } = {
     ["87259391926321"]=true,["93366464803829"]=true,["93432652624003"]=true,
     ["95802026624883"]=true,["96594507550917"]=true,["96959123077498"]=true,
     ["99050723653468"]=true,["99829427721752"]=true,
+    -- Noli (captured from NarratorNoli + Milestone100Noli)
+    ["85082460915086"]=true,["71859647134376"]=true,["77907043310586"]=true,
+    ["73725929447486"]=true,["89315669689903"]=true,["75227733554331"]=true,
+    ["116736732174423"]=true,["113510808639647"]=true,["102491594132079"]=true,
+    ["105484443350662"]=true,["85810983952228"]=true,["70522191793442"]=true,
+    ["107347032614322"]=true,["106727013904874"]=true,["82260342194598"]=true,
 }
 
 -- SHARED HELPERS
@@ -2611,6 +2620,20 @@ do
         blockedUntil[sound] = now + 0.1
 
         local function doFire()
+            -- snap toward target before firing if silent aim is active for this ability type
+            local killerModel = char :: Model
+            local killerName  = killerModel.Name:lower()
+            if killerName:find("noli") then
+                pcall(function() SilentAim.snap("NoliNova") end)
+            elseif killerName:find("c00lkidd") or killerName:find("coolkidd") then
+                pcall(function() SilentAim.snap("CorruptNature") end)
+            elseif killerName:find("dusekkar") then
+                pcall(function() SilentAim.snap("PlasmaBeam") end)
+            elseif killerName:find("nosferatu") then
+                pcall(function() SilentAim.snap("HuntersFeast") end)
+            elseif killerName:find("1x1x1x1") or killerName:find("1x1") then
+                pcall(function() SilentAim.snap("CrystalPitch") end)
+            end
             if AB.autoblocktype == "Block" then
                 fireAbility("Block")
                 if AB.doubleblocktech then fireAbility("Punch") end
@@ -3435,7 +3458,7 @@ end
 --   The result is a smooth camlock with zero input breakage on any
 --   platform including mobile.
 
-local Aimbot = {}
+-- Aimbot table was forward-declared above fireAbility; filling it in now
 do
     local aimbotEnabled:    boolean = false
     local camLockEnabled:   boolean = true
@@ -3843,22 +3866,30 @@ AimbotTab:CreateLabel("Prediction leads torso using horizontal velocity × facto
 -- before the packet leaves the client.
 local SilentAim = {}
 do
-    local enabled:          boolean   = false
-    local currentTarget:    BasePart? = nil  -- killer torso to redirect toward
-    local fovRadius:        number    = 160  -- silent aim has wider fov than aimbot
-    local maxDist:          number    = 60
-    local missChance:       number    = 0
+    local enabled:      boolean   = false
+    local fovRadius:    number    = 160
+    local maxDist:      number    = 60
+    local missChance:   number    = 0
+    local currentTarget: BasePart? = nil
 
-    -- Resolve killer torso — same logic as aimbot
+    -- Per-ability toggles
+    local skills: { [string]: boolean } = {
+        NoliNova        = true,
+        CorruptNature   = true,
+        PlasmaBeam      = true,
+        HuntersFeast    = true,
+        CrystalPitch    = true,
+    }
+
     local function getKillerTorso(): BasePart?
         local cam   = workspace.CurrentCamera
-        local myHRP = LocalPlayer.Character
-            and (LocalPlayer.Character :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
+        local myChar = LocalPlayer.Character
+        local myHRP = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
         if not cam or not myHRP then return nil end
 
-        local centre = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-        local best:  BasePart? = nil
-        local bestPx: number   = math.huge
+        local centre  = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+        local best:    BasePart? = nil
+        local bestPx:  number    = math.huge
 
         local kf: Instance? = nil
         pcall(function() kf = workspace.Players.Killers end)
@@ -3876,15 +3907,12 @@ do
             local sp, onScreen = cam:WorldToViewportPoint(torso.Position)
             if not onScreen then continue end
             local px = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
-            if px < bestPx and px <= fovRadius then
-                bestPx = px; best = torso
-            end
+            if px < bestPx and px <= fovRadius then bestPx = px; best = torso end
         end
         return best
     end
 
-    -- Heartbeat: refresh cached target every 0.05s (not every frame)
-    -- so the hook can read it synchronously without scanning mid-hook
+    -- Refresh cached target every 0.05s
     task.spawn(function()
         while true do
             task.wait(0.05)
@@ -3896,25 +3924,55 @@ do
         end
     end)
 
+    -- Snaps the character HRP to face the target, fires the ability, then
+    -- restores AutoRotate. Calling this before FireServer means the server
+    -- calculates the hit direction from the already-rotated HRP.
+    function SilentAim.snap(skillKey: string)
+        if not enabled then return end
+        if not skills[skillKey] then return end
+        if missChance > 0 and math.random(100) <= missChance then return end
+
+        local target = currentTarget or getKillerTorso()
+        if not target then return end
+
+        local myChar = LocalPlayer.Character
+        local myHRP  = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
+        local hum    = myChar and (myChar :: Model):FindFirstChildOfClass("Humanoid")
+        if not myHRP then return end
+
+        -- Rotate HRP to face target instantly before the remote fires
+        local flat = Vector3.new(target.Position.X, myHRP.Position.Y, target.Position.Z)
+        local dir  = flat - myHRP.Position
+        if dir.Magnitude < 0.01 then return end
+
+        if hum then hum.AutoRotate = false end
+        myHRP.CFrame = CFrame.new(myHRP.Position, myHRP.Position + dir.Unit)
+
+        -- Restore AutoRotate shortly after so normal movement resumes
+        task.delay(0.3, function()
+            pcall(function()
+                local c = LocalPlayer.Character
+                if c then
+                    local h = c:FindFirstChildOfClass("Humanoid")
+                    if h then h.AutoRotate = true end
+                end
+            end)
+        end)
+    end
+
     function SilentAim.setEnabled(v: boolean)
         enabled = v
         if not v then currentTarget = nil end
     end
-    function SilentAim.setFOV(v: number)      fovRadius  = v end
-    function SilentAim.setMaxDist(v: number)  maxDist    = v end
-    function SilentAim.setMiss(v: number)     missChance = math.clamp(v, 0, 20) end
-    function SilentAim.getEnabled(): boolean  return enabled end
-    function SilentAim.getTarget(): BasePart? return currentTarget end
-    function SilentAim.getMiss(): number      return missChance end
+    function SilentAim.setSkill(key: string, v: boolean) skills[key] = v end
+    function SilentAim.setFOV(v: number)     fovRadius  = v end
+    function SilentAim.setMaxDist(v: number) maxDist    = v end
+    function SilentAim.setMiss(v: number)    missChance = math.clamp(v, 0, 20) end
+    function SilentAim.getEnabled(): boolean return enabled end
 end
 
--- SILENT AIM TAB (WIP)
+-- Silent Aim Tab
 local SilentAimTab = Window:CreateTab("Silent Aim", 4483362458)
-
-SilentAimTab:CreateSection("⚠️ Work In Progress")
-SilentAimTab:CreateLabel("Silent Aim is currently under development.")
-SilentAimTab:CreateLabel("Remote hook integration pending — toggles are live but")
-SilentAimTab:CreateLabel("the server-side redirect is not yet wired to the ability remote.")
 
 SilentAimTab:CreateSection("Silent Aim")
 
@@ -3922,9 +3980,50 @@ SilentAimTab:CreateToggle({
     Name="Enable Silent Aim", CurrentValue=false, Flag="SilentAim_Enable",
     Callback=function(v: boolean)
         SilentAim.setEnabled(v)
-        notify("Silent Aim",
-            v and "Silent Aim ON — target tracking active (WIP)."
-              or "Silent Aim disabled.", 3)
+        notify("Silent Aim", v and "Silent Aim ON — snaps ur character before each ability." or "Disabled.", 3)
+    end,
+})
+
+SilentAimTab:CreateSection("Ability Targets")
+SilentAimTab:CreateLabel("Each skill snaps your character to face the nearest killer before firing.")
+
+SilentAimTab:CreateToggle({
+    Name="Noli — Nova", CurrentValue=true, Flag="SA_NoliNova",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("NoliNova", v)
+        notify("Silent Aim", v and "Nova redirect ON." or "Nova redirect OFF.", 2)
+    end,
+})
+
+SilentAimTab:CreateToggle({
+    Name="c00lkidd — Corrupt Nature", CurrentValue=true, Flag="SA_CorruptNature",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("CorruptNature", v)
+        notify("Silent Aim", v and "Corrupt Nature redirect ON." or "OFF.", 2)
+    end,
+})
+
+SilentAimTab:CreateToggle({
+    Name="Dusekkar — Plasma Beam", CurrentValue=true, Flag="SA_PlasmaBeam",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("PlasmaBeam", v)
+        notify("Silent Aim", v and "Plasma Beam redirect ON." or "OFF.", 2)
+    end,
+})
+
+SilentAimTab:CreateToggle({
+    Name="Nosferatu — Hunter's Feast", CurrentValue=true, Flag="SA_HuntersFeast",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("HuntersFeast", v)
+        notify("Silent Aim", v and "Hunter's Feast redirect ON." or "OFF.", 2)
+    end,
+})
+
+SilentAimTab:CreateToggle({
+    Name="1x1x1x1 — Crystal Pitch", CurrentValue=true, Flag="SA_CrystalPitch",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("CrystalPitch", v)
+        notify("Silent Aim", v and "Crystal Pitch redirect ON." or "OFF.", 2)
     end,
 })
 
@@ -3960,36 +4059,10 @@ SilentAimTab:CreateSlider({
     Callback=function(v: number) SilentAim.setMiss(v) end,
 })
 
-SilentAimTab:CreateSection("Ability Targets (WIP)")
-SilentAimTab:CreateLabel("The following abilities will be redirected when Silent Aim is active.")
-SilentAimTab:CreateLabel("Each toggle marks that ability's outgoing packet for torso redirect.")
-
-SilentAimTab:CreateToggle({
-    Name="Noli — Nova (ranged poke)", CurrentValue=true, Flag="SA_NoliNova",
-    Callback=function(v: boolean)
-        notify("Silent Aim", v and "Noli Nova redirect ON." or "Noli Nova redirect OFF.", 2)
-    end,
-})
-
-SilentAimTab:CreateToggle({
-    Name="c00lkidd — Corrupt Nature (tag)", CurrentValue=true, Flag="SA_CorruptNature",
-    Callback=function(v: boolean)
-        notify("Silent Aim", v and "Corrupt Nature redirect ON." or "Corrupt Nature redirect OFF.", 2)
-    end,
-})
-
-SilentAimTab:CreateToggle({
-    Name="Dusekkar — Plasma Beam (ranged)", CurrentValue=true, Flag="SA_PlasmaBeam",
-    Callback=function(v: boolean)
-        notify("Silent Aim", v and "Plasma Beam redirect ON." or "Plasma Beam redirect OFF.", 2)
-    end,
-})
-
 SilentAimTab:CreateSection("Info")
-SilentAimTab:CreateLabel("Silent Aim redirects the punch/block packet server-side")
-SilentAimTab:CreateLabel("so hits register on the killer torso without aiming at them.")
-SilentAimTab:CreateLabel("Target is tracked from workspace.Players.Killers folder.")
-SilentAimTab:CreateLabel("Separate FOV/distance from Aimbot — can be used independently.")
+SilentAimTab:CreateLabel("Snaps ur HRP toward nearest killer right before the ability fires")
+SilentAimTab:CreateLabel("Server reads ur facing direction — hit registers without aiming")
+SilentAimTab:CreateLabel("Works for: Nova, Corrupt Nature, Plasma Beam, Feast, Crystal Pitch")
 
 -- MUSIC TAB
 local MusicTab = Window:CreateTab("Music", 4483362458)
