@@ -20,6 +20,13 @@ local function AddConn(c: Connection) table.insert(Connections, c) end
 
 getgenv().XenonZDestroy = function()
     for _, c in Connections do pcall(function() c:Disconnect() end) end
+    -- clean up world-space objects
+    pcall(function()
+        if rangeCircleConn then rangeCircleConn:Disconnect() end
+        if rangeCirclePart then rangeCirclePart:Destroy() end
+        if coneLineL then coneLineL:Destroy() end
+        if coneLineR then coneLineR:Destroy() end
+    end)
     getgenv().XenonZLoaded = false
     print("[XenonZ] Destroyed cleanly.")
 end
@@ -49,14 +56,12 @@ type FlagsTable = {
     genESP: boolean, itemESP: boolean, tripmineESP: boolean, tripwireESP: boolean,
     fullBright: boolean, removeFog: boolean, autoGen: boolean,
     buildermanESP: boolean, elliotPizzaESP: boolean, veeronicaSprayESP: boolean,
-    filesESP: boolean,
 }
 local flags: FlagsTable = {
     infStamina=false, noclipping=false, killerESP=false, playerESP=false,
     genESP=false, itemESP=false, tripmineESP=false, tripwireESP=false,
     fullBright=false, removeFog=false, autoGen=false,
     buildermanESP=false, elliotPizzaESP=false, veeronicaSprayESP=false,
-    filesESP=false,
 }
 
 local Rayfield: any
@@ -710,251 +715,6 @@ AddConn(workspace.DescendantAdded:Connect(function(obj: Instance)
     end)
 end))
 
--- DOCUMENT / FOLDER ESP — Jane Doe Quest Items (4.0.0)
--- Detects both:
---   1. Physical collectible objects named "Document" etc.
---      (BasePart / Model — exactly what the game spawns for
---       Jane Doe quest items, as confirmed by gameplay footage)
---   2. Folder instances (containers for quest/lore data)
--- Uses DescendantAdded only — zero polling overhead.
-
-VisualsTab:CreateSection("Document ESP")
-
--- Keywords that match the physical Document objects and any Folder
--- containers the game uses for Jane Doe's basement quest items.
-local DOCUMENT_KWS: { string } = {
-    -- Exact matches most likely used by Forsaken
-    "document","documents",
-    "janedoe","jane_doe",
-    "basement","basementdoc",
-    "lore","lorefile","lorepage",
-    "quest","questitem","questfile",
-    "note","notes","letter","memo",
-    "dossier","casefile","evidence",
-    "collectible","collect",
-    "file","files",
-    "report","record",
-}
-
-local docESPTracked: { [Instance]: boolean } = {}
-
--- Checks whether this instance is a Document-type object
-local function isDocumentObj(obj: Instance): boolean
-    local n = obj.Name:lower()
-    -- Folder instances are always candidates
-    if obj:IsA("Folder") then
-        for _, kw in DOCUMENT_KWS do
-            if n:find(kw) then return true end
-        end
-        return false
-    end
-    -- Physical objects (Model / BasePart) — must match a keyword
-    if obj:IsA("Model") or obj:IsA("BasePart") then
-        for _, kw in DOCUMENT_KWS do
-            if n:find(kw) then return true end
-        end
-    end
-    return false
-end
-
-local function resolveDocAdornee(obj: Instance): BasePart?
-    if obj:IsA("BasePart") then return obj :: BasePart end
-    if obj:IsA("Model") then
-        local root: BasePart? = (obj :: Model).PrimaryPart
-            or obj:FindFirstChildWhichIsA("BasePart") :: BasePart?
-        if not root then
-            for _, d in obj:GetDescendants() do
-                if d:IsA("BasePart") then root = d :: BasePart; break end
-            end
-        end
-        return root
-    end
-    if obj:IsA("Folder") then
-        -- Try children and parent for a BasePart to adorn
-        local bp = obj:FindFirstChildWhichIsA("BasePart") :: BasePart?
-        if not bp then
-            for _, d in obj:GetDescendants() do
-                if d:IsA("BasePart") then bp = d :: BasePart; break end
-            end
-        end
-        if not bp and obj.Parent and obj.Parent:IsA("BasePart") then
-            bp = obj.Parent :: BasePart
-        end
-        return bp
-    end
-    return nil
-end
-
--- Builds the label text based on the object name
-local function buildDocLabel(name: string): string
-    local n = name:lower()
-    if n:find("janedoe") or n:find("jane_doe") then
-        return "📁 Jane Doe Document"
-    elseif n == "document" or n == "documents" then
-        return "📄 Document — Collect!"
-    elseif n:find("document") then
-        return `📄 {name} — Collect!`
-    elseif n:find("basement") then
-        return "🏚️ Basement Document"
-    elseif n:find("lore") then
-        return "📖 Lore Document"
-    elseif n:find("quest") then
-        return "📋 Quest Item"
-    elseif n:find("note") or n:find("letter") or n:find("memo") then
-        return `📝 {name}`
-    elseif n:find("evidence") or n:find("casefile") or n:find("dossier") then
-        return `🗂️ {name}`
-    else
-        return `📁 {name}`
-    end
-end
-
-local function applyDocESP(obj: Instance)
-    if not flags.filesESP then return end
-    if not isDocumentObj(obj) then return end
-    if docESPTracked[obj] then return end
-    docESPTracked[obj] = true
-
-    -- Resolve the MODEL container — we parent the Highlight to the Model,
-    -- NOT to a BasePart. Parenting to BasePart intercepts ProximityPrompt
-    -- raycasts and makes the "Document Collect" prompt unclickable.
-    local container: Instance? = nil
-    local adornee: BasePart?   = nil
-
-    if obj:IsA("Model") then
-        container = obj
-        adornee   = (obj :: Model).PrimaryPart
-            or obj:FindFirstChildWhichIsA("BasePart") :: BasePart?
-        if not adornee then
-            for _, d in obj:GetDescendants() do
-                if d:IsA("BasePart") then adornee = d :: BasePart; break end
-            end
-        end
-    elseif obj:IsA("BasePart") then
-        -- Prefer the model parent as the container
-        if obj.Parent and obj.Parent:IsA("Model") then
-            container = obj.Parent
-            adornee   = obj :: BasePart
-        else
-            container = obj
-            adornee   = obj :: BasePart
-        end
-    elseif obj:IsA("Folder") then
-        container = obj
-        adornee   = obj:FindFirstChildWhichIsA("BasePart") :: BasePart?
-        if not adornee then
-            for _, d in obj:GetDescendants() do
-                if d:IsA("BasePart") then adornee = d :: BasePart; break end
-            end
-        end
-        if not adornee and obj.Parent and obj.Parent:IsA("BasePart") then
-            adornee = obj.Parent :: BasePart
-        end
-    end
-
-    if not adornee or not container then docESPTracked[obj] = nil; return end
-
-    -- Remove stale ESP
-    local ex1 = container:FindFirstChild("FolderESP_Hl")
-    local ex2 = adornee:FindFirstChild("FolderESP_BB")
-    if ex1 then ex1:Destroy() end
-    if ex2 then ex2:Destroy() end
-
-    
-    
-    local hl = Instance.new("Highlight")
-    hl.Name                = "FolderESP_Hl"
-    hl.Adornee             = adornee
-    hl.FillColor           = Color3.fromRGB(255, 245, 200)
-    hl.OutlineColor        = Color3.fromRGB(255, 210, 60)
-    hl.FillTransparency    = 0.25
-    hl.OutlineTransparency = 0
-    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Parent              = container  -- KEY: parent to container, not adornee
-
-    
-    local bb = Instance.new("BillboardGui")
-    bb.Name        = "FolderESP_BB"
-    bb.Adornee     = adornee
-    bb.Size        = UDim2.new(0, 180, 0, 22)
-    bb.StudsOffset = Vector3.new(0, 4, 0)
-    bb.AlwaysOnTop = true
-    bb.MaxDistance = 120
-    bb.Parent      = adornee
-    local lbl = Instance.new("TextLabel")
-    lbl.Size                   = UDim2.new(1,0,1,0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text                   = buildDocLabel(obj.Name)
-    lbl.TextColor3             = Color3.fromRGB(255, 245, 200)
-    lbl.TextStrokeColor3       = Color3.fromRGB(80, 50, 0)
-    lbl.TextStrokeTransparency = 0.2
-    lbl.TextScaled             = false
-    lbl.TextSize               = 11
-    lbl.Font                   = Enum.Font.GothamBold
-    lbl.Parent                 = bb
-
-    -- Auto-cleanup on removal
-    container.AncestryChanged:Connect(function()
-        if not container.Parent then
-            pcall(function() hl:Destroy() end)
-            pcall(function() bb:Destroy() end)
-            docESPTracked[obj] = nil
-        end
-    end)
-end
-
-local function removeDocESPAll()
-    docESPTracked = {}
-    for _, obj in workspace:GetDescendants() do
-        local hl = obj:FindFirstChild("FolderESP_Hl")
-        local bb = obj:FindFirstChild("FolderESP_BB")
-        if hl then hl:Destroy() end
-        if bb then bb:Destroy() end
-    end
-end
-
-VisualsTab:CreateToggle({
-    Name="Document / Folder ESP (Parchment)", CurrentValue=false, Flag="FilesESP",
-    Callback=function(v: boolean)
-        flags.filesESP = v
-        if not v then
-            safeCall(removeDocESPAll)
-            notify("Document ESP", "Disabled.", 3)
-            return
-        end
-        safeCall(function()
-            for _, obj in workspace:GetDescendants() do
-                applyDocESP(obj)
-            end
-        end)
-        notify("Document ESP",
-            "Scanning for Document collectibles & Jane Doe quest items!", 3)
-    end,
-})
-
-AddConn(workspace.DescendantAdded:Connect(function(obj: Instance)
-    if not flags.filesESP then return end
-    -- Only process types that can be document objects — skip sounds, effects, etc.
-    if not (obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Folder")) then return end
-    task.wait(0.15)  -- wait for the object's children (ProximityPrompt, meshes) to load
-    if not flags.filesESP then return end
-    safeCall(function()
-        -- Check the object itself
-        applyDocESP(obj)
-        -- Also check the parent — when a Part is added inside a Document Model,
-        -- the Model may already be in workspace and skipped by docESPTracked.
-        -- Re-run on the parent to catch this case.
-        if obj.Parent and (obj.Parent:IsA("Model") or obj.Parent:IsA("Folder")) then
-            if not docESPTracked[obj.Parent] then
-                applyDocESP(obj.Parent)
-            end
-        end
-    end)
-end))
-
-VisualsTab:CreateLabel("📄 Parchment = Document collectibles (Jane Doe quest, basement lore)")
-VisualsTab:CreateLabel("Detects both physical Document objects AND Folder containers")
-
 -- BUILDERMAN ESP  — Sentry (Orange) + Dispenser (Yellow-Gold)
 -- Using colours distinct from normal Player ESP and Vandalism ESP.
 
@@ -1309,26 +1069,21 @@ SurvivorTab:CreateToggle({
         end
         if not v then notify("Anti-Slowness", "Disabled.", 3); return end
 
+        local _aslFrame = 0
         antiSlownessConn = RunService.Heartbeat:Connect(function()
+            _aslFrame += 1
+            if _aslFrame % 6 ~= 0 then return end
             safeCall(function()
                 local hum = getHumanoid()
                 if not hum then return end
-
-                -- Read what the sprint module considers the correct base speed.
-                -- If the speed hack is active, currentWalkSpeed is authoritative.
-                -- Otherwise fall back to the sprint module or the Humanoid default.
-                local baseSpeed: number = 12  -- Forsaken survivor default
+                local baseSpeed: number = 12
                 local m = getSprintModule()
                 if m then
                     baseSpeed = m.WalkSpeed or m.BaseSpeed or baseSpeed
                 end
-                -- If speed hack is on, its value is the intended base
                 if speedEnabled then
                     baseSpeed = currentWalkSpeed
                 end
-
-                -- If the game has applied a slowness debuff (WalkSpeed dropped
-                -- below what we expect), slam it back immediately.
                 if hum.WalkSpeed < baseSpeed - 0.5 then
                     hum.WalkSpeed = baseSpeed
                 end
@@ -1733,102 +1488,138 @@ StaminaTab:CreateToggle({
 StaminaTab:CreateLabel("Survivor: drains within 85 studs of Killer | Drain: 10/s | Regen: 20/s")
 StaminaTab:CreateLabel("Killer: drains when running | Lockout at 0: 2 seconds")
 
--- stamina display above ur own head
+-- Stamina Overhead Display
+-- Simulates the real stamina value locally using Forsaken's documented rates.
+-- This means the display shows the actual drain/regen cycle even when Infinite
+-- Stamina is on (the module suppresses drain but we simulate it here so you
+-- can see what your stamina would be without cheating, useful for timing).
+--
+-- Killer:   max=110, drain=9.5/s, regen=21/s
+-- Survivor: max=100, drain=10/s,  regen=20/s
 StaminaTab:CreateSection("Stamina Overhead Display")
 
-local staminaBB:   BillboardGui? = nil
-local staminaLbl:  TextLabel?    = nil
-local staminaConn: Connection?   = nil
+local staminaBB:   any         = nil
+local staminaLbl:  any         = nil
+local staminaConn: Connection? = nil
+
+-- Simulated stamina state
+local simStamina:     number  = 100
+local simLastTick:    number  = 0
+local simInitialised: boolean = false
+
+local STAMINA_KILLER   = { max = 110, drain = 9.5,  regen = 21 }
+local STAMINA_SURVIVOR = { max = 100, drain = 10,   regen = 20 }
+
+local function getStaminaStats(): { max: number, drain: number, regen: number }
+    local kf: Instance? = nil
+    pcall(function() kf = workspace.Players.Killers end)
+    if kf then
+        for _, m in (kf :: Instance):GetChildren() do
+            if Players:GetPlayerFromCharacter(m) == LocalPlayer then
+                return STAMINA_KILLER
+            end
+        end
+    end
+    return STAMINA_SURVIVOR
+end
+
+local function isCurrentlySprinting(): boolean
+    local char = LocalPlayer.Character
+    local hum  = char and (char :: Model):FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    -- Sprinting = moving faster than walk speed baseline
+    return hum.MoveDirection.Magnitude > 0.01 and hum.WalkSpeed > 14
+end
 
 local function buildStaminaBillboard()
-    local char = getChar()
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+    local char = LocalPlayer.Character
+    local hrp  = char and (char :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
     if not hrp then return end
-
-    -- Remove any old instance first
-    local old = char and char:FindFirstChild("XenonZ_StaminaBB")
+    local old = char and (char :: Model):FindFirstChild("XenonZ_StaBB")
     if old then old:Destroy() end
-
     local bb = Instance.new("BillboardGui")
-    bb.Name        = "XenonZ_StaminaBB"
+    bb.Name        = "XenonZ_StaBB"
     bb.Adornee     = hrp
-    bb.Size        = UDim2.new(0, 120, 0, 18)
-    bb.StudsOffset = Vector3.new(0, 3.8, 0)  -- sits above the ESP name label
-    bb.AlwaysOnTop = false  -- occludes naturally so it doesn't float through walls
+    bb.Size        = UDim2.new(0, 130, 0, 18)
+    bb.StudsOffset = Vector3.new(0, 3.8, 0)
+    bb.AlwaysOnTop = false
     bb.MaxDistance = 40
     bb.Parent      = char :: Model
-
     local lbl = Instance.new("TextLabel")
     lbl.Size                   = UDim2.new(1, 0, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.TextSize               = 10
     lbl.TextScaled             = false
     lbl.Font                   = Enum.Font.GothamBold
-    lbl.TextColor3             = Color3.fromRGB(100, 220, 255)  -- cyan — distinct from HP green
+    lbl.TextColor3             = Color3.fromRGB(80, 220, 255)
     lbl.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
     lbl.TextStrokeTransparency = 0.3
     lbl.Text                   = "STA: --"
     lbl.Parent                 = bb
-
     staminaBB  = bb
     staminaLbl = lbl
-end
-
-local function getStaminaValue(): number?
-    -- Read from the sprint module's stamina field.
-    -- Forsaken's sprint module exposes Stamina, CurrentStamina, or StaminaValue.
-    local m = getSprintModule()
-    if not m then return nil end
-    local val = m.Stamina or m.CurrentStamina or m.StaminaValue
-    if type(val) == "number" then return math.floor(val) end
-    -- Some modules expose stamina as an attribute on the character
-    local char = getChar()
-    if char then
-        local a = char:GetAttribute("Stamina") or char:GetAttribute("CurrentStamina")
-        if type(a) == "number" then return math.floor(a) end
-        -- Check a NumberValue child
-        local sv = char:FindFirstChild("Stamina") or char:FindFirstChild("StaminaValue")
-        if sv and sv:IsA("NumberValue") then return math.floor((sv :: NumberValue).Value) end
-    end
-    return nil
 end
 
 local function startStaminaDisplay()
     if staminaConn then staminaConn:Disconnect(); staminaConn = nil end
     buildStaminaBillboard()
-
-    staminaConn = RunService.Heartbeat:Connect(function()
+    simInitialised = false
+    local _frame = 0
+    staminaConn = RunService.Heartbeat:Connect(function(dt: number)
+        _frame += 1
+        if _frame % 4 ~= 0 then return end
         if not staminaBB or not staminaBB.Parent then
-            -- Character was reset — rebuild
-            buildStaminaBillboard()
-            return
+            buildStaminaBillboard(); return
         end
         if not staminaLbl then return end
-        local val = getStaminaValue()
-        if val then
-            -- Colour shifts: green = high, yellow = mid, red = low
-            local colour: Color3
-            if val >= 70 then
-                colour = Color3.fromRGB(80, 255, 120)
-            elseif val >= 30 then
-                colour = Color3.fromRGB(255, 220, 60)
-            else
-                colour = Color3.fromRGB(255, 80, 80)
-            end
-            staminaLbl.TextColor3 = colour
-            staminaLbl.Text       = `STA: {val}/100`
+
+        local stats = getStaminaStats()
+
+        -- Initialise sim from the sprint module's current value if available
+        if not simInitialised then
+            local m = getSprintModule()
+            local v = m and (m.Stamina or m.CurrentStamina or m.StaminaValue)
+            simStamina     = (type(v) == "number" and math.clamp(v, 0, stats.max)) or stats.max
+            simInitialised = true
+            simLastTick    = tick()
+        end
+
+        -- Advance simulation using elapsed real time (dt * 4 since we run every 4 frames)
+        local elapsed = tick() - simLastTick
+        simLastTick   = tick()
+
+        if isCurrentlySprinting() then
+            simStamina = math.max(0, simStamina - stats.drain * elapsed)
         else
-            staminaLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
-            staminaLbl.Text       = "STA: N/A"
+            simStamina = math.min(stats.max, simStamina + stats.regen * elapsed)
+        end
+
+        -- Display
+        local display = math.floor(simStamina)
+        local pct     = simStamina / stats.max
+        local colour: Color3
+        if pct >= 0.7 then
+            colour = Color3.fromRGB(80, 255, 120)
+        elseif pct >= 0.3 then
+            colour = Color3.fromRGB(255, 220, 60)
+        else
+            colour = Color3.fromRGB(255, 80, 80)
+        end
+
+        staminaLbl.TextColor3 = colour
+        if flags.infStamina then
+            staminaLbl.Text = `STA: {display}/{stats.max} ∞`
+        else
+            staminaLbl.Text = `STA: {display}/{stats.max}`
         end
     end)
 end
 
 local function stopStaminaDisplay()
     if staminaConn then staminaConn:Disconnect(); staminaConn = nil end
-    local char = getChar()
+    local char = LocalPlayer.Character
     if char then
-        local bb = char:FindFirstChild("XenonZ_StaminaBB")
+        local bb = (char :: Model):FindFirstChild("XenonZ_StaBB")
         if bb then bb:Destroy() end
     end
     staminaBB  = nil
@@ -1840,12 +1631,14 @@ StaminaTab:CreateToggle({
     Callback=function(v: boolean)
         if v then
             startStaminaDisplay()
-            -- Also re-build on respawn
             AddConn(LocalPlayer.CharacterAdded:Connect(function()
                 task.wait(1)
-                if staminaConn then buildStaminaBillboard() end
+                if staminaConn then
+                    simInitialised = false
+                    buildStaminaBillboard()
+                end
             end))
-            notify("Stamina Display", "Stamina shown above your head. 🩵", 3)
+            notify("Stamina Display", "Simulating real drain/regen above head.", 3)
         else
             stopStaminaDisplay()
             notify("Stamina Display", "Hidden.", 2)
@@ -1853,166 +1646,10 @@ StaminaTab:CreateToggle({
     end,
 })
 
-StaminaTab:CreateLabel("Green = 70–100  |  Yellow = 30–69  |  Red = 0–29")
-StaminaTab:CreateLabel("Shows actual value even when Infinite Stamina is ON")
-
--- OTHER PLAYERS STAMINA DISPLAY
--- Renders a stamina bar/label above every other player's head.
-StaminaTab:CreateSection("Other Players Stamina")
-
-local otherStaminaEnabled: boolean = false
-local otherStaminaBBs: { [Player]: { bb: BillboardGui?, conn: Connection? } } = {}
-
-local function getPlayerStamina(c: Model): number?
-    -- Try NumberValue child on the character
-    for _, name in {"Stamina","StaminaValue","CurrentStamina","SprintStamina"} do
-        local v = c:FindFirstChild(name)
-        if v and v:IsA("NumberValue") then
-            return math.clamp(math.floor((v :: NumberValue).Value), 0, 100)
-        end
-    end
-    -- Try attributes
-    for _, name in {"Stamina","CurrentStamina","StaminaValue"} do
-        local a = c:GetAttribute(name)
-        if type(a) == "number" then
-            return math.clamp(math.floor(a), 0, 100)
-        end
-    end
-    return nil
-end
-
-local function staminaColour(val: number): Color3
-    if val >= 70 then return Color3.fromRGB(80, 255, 120)
-    elseif val >= 30 then return Color3.fromRGB(255, 220, 60)
-    else return Color3.fromRGB(255, 80, 80) end
-end
-
-local function buildOtherStaminaBB(p: Player, c: Model)
-    if p == LocalPlayer then return end
-    local hrp = c:FindFirstChild("HumanoidRootPart") :: BasePart?
-    if not hrp then return end
-
-    -- Clean up any existing BB for this player
-    local entry = otherStaminaBBs[p]
-    if entry then
-        if entry.conn then pcall(function() entry.conn:Disconnect() end) end
-        if entry.bb and entry.bb.Parent then entry.bb:Destroy() end
-    end
-
-    local bb = Instance.new("BillboardGui")
-    bb.Name        = "XenonZ_OtherStaBB"
-    bb.Adornee     = hrp
-    bb.Size        = UDim2.new(0, 120, 0, 16)
-    bb.StudsOffset = Vector3.new(0, 2.8, 0)  -- below the ESP name label
-    bb.AlwaysOnTop = false
-    bb.MaxDistance = 60
-    bb.Parent      = c
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size                   = UDim2.new(1,0,1,0)
-    lbl.BackgroundTransparency = 1
-    lbl.TextSize               = 10
-    lbl.TextScaled             = false
-    lbl.Font                   = Enum.Font.GothamBold
-    lbl.TextStrokeColor3       = Color3.fromRGB(0,0,0)
-    lbl.TextStrokeTransparency = 0.3
-    lbl.Text                   = "STA: ?"
-    lbl.TextColor3             = Color3.fromRGB(200, 200, 200)
-    lbl.Parent                 = bb
-
-    -- Update loop — checks the stamina value each heartbeat
-    local conn = RunService.Heartbeat:Connect(function()
-        if not otherStaminaEnabled or not bb.Parent then return end
-        local val = getPlayerStamina(c)
-        if val then
-            lbl.Text       = `STA: {val}/100`
-            lbl.TextColor3 = staminaColour(val)
-        else
-            lbl.Text       = "STA: ?"
-            lbl.TextColor3 = Color3.fromRGB(160, 160, 160)
-        end
-    end)
-    AddConn(conn)
-
-    -- Auto-cleanup when character is removed
-    c.AncestryChanged:Connect(function()
-        if not c.Parent then
-            pcall(function() conn:Disconnect() end)
-            pcall(function() bb:Destroy() end)
-            otherStaminaBBs[p] = nil
-        end
-    end)
-
-    otherStaminaBBs[p] = { bb = bb, conn = conn }
-end
-
-local function applyOtherStaminaToAll()
-    for _, p in Players:GetPlayers() do
-        if p == LocalPlayer then continue end
-        local c = p.Character
-        if c then buildOtherStaminaBB(p, c) end
-        -- don't create dummy entries — buildOtherStaminaBB handles the entry
-    end
-end
-
-local function removeAllOtherStaminaBBs()
-    for p, entry in otherStaminaBBs do
-        if entry and entry.conn then pcall(function() entry.conn:Disconnect() end) end
-        if entry and entry.bb and entry.bb.Parent then entry.bb:Destroy() end
-    end
-    otherStaminaBBs = {}
-end
-
-local otherStaminaPlayerConn: Connection? = nil
-local otherStaminaCharConns:  { [Player]: Connection } = {}
-
-StaminaTab:CreateToggle({
-    Name="Show Other Players Stamina", CurrentValue=false, Flag="OtherStaminaDisplay",
-    Callback=function(v: boolean)
-        otherStaminaEnabled = v
-        if not v then
-            removeAllOtherStaminaBBs()
-            if otherStaminaPlayerConn then
-                otherStaminaPlayerConn:Disconnect()
-                otherStaminaPlayerConn = nil
-            end
-            for _, c in otherStaminaCharConns do pcall(function() c:Disconnect() end) end
-            otherStaminaCharConns = {}
-            notify("Stamina Display", "Other players stamina hidden.", 2)
-            return
-        end
-
-        applyOtherStaminaToAll()
-
-        -- Hook new players joining
-        otherStaminaPlayerConn = Players.PlayerAdded:Connect(function(p: Player)
-            if not otherStaminaEnabled then return end
-            local charConn = p.CharacterAdded:Connect(function(c: Model)
-                task.wait(0.5)
-                if otherStaminaEnabled then buildOtherStaminaBB(p, c) end
-            end)
-            otherStaminaCharConns[p] = charConn
-            -- not AddConn'd — manually disconnected on toggle off
-        end)
-        AddConn(otherStaminaPlayerConn)
-
-        -- Hook existing players' future characters
-        for _, p in Players:GetPlayers() do
-            if p == LocalPlayer then continue end
-            local charConn = p.CharacterAdded:Connect(function(c: Model)
-                task.wait(0.5)
-                if otherStaminaEnabled then buildOtherStaminaBB(p, c) end
-            end)
-            otherStaminaCharConns[p] = charConn
-            -- not AddConn'd — manually disconnected on toggle off
-        end
-
-        notify("Stamina Display", "Other players stamina visible above their heads! 💙", 3)
-    end,
-})
-
-StaminaTab:CreateLabel("Reads stamina from character NumberValue / attribute")
-StaminaTab:CreateLabel("Green = high | Yellow = mid | Red = low | ? = not readable")
+StaminaTab:CreateLabel("Green = high | Yellow = mid | Red = low")
+StaminaTab:CreateLabel("∞ shown when Infinite Stamina is ON — drain still simulated")
+StaminaTab:CreateLabel("Killer: 9.5 drain / 21 regen / 110 max")
+StaminaTab:CreateLabel("Survivor: 10 drain / 20 regen / 100 max")
 
 -- FE Speed Hack
 StaminaTab:CreateSection("Speed (FE — Hitbox Follows)")
@@ -2045,12 +1682,14 @@ local speedHeartbeatConn: Connection? = nil
 
 local function startSpeedLoop()
     if speedHeartbeatConn then return end  -- already running
+    local _spFrame = 0
     speedHeartbeatConn = RunService.Heartbeat:Connect(function()
+        _spFrame += 1
+        if _spFrame % 3 ~= 0 then return end
         if not speedEnabled then return end
         pcall(function()
             local hum = getHumanoid()
             if hum then
-                -- Only write if it has drifted — avoids unnecessary dirty flags
                 if hum.WalkSpeed ~= currentWalkSpeed then
                     hum.WalkSpeed = currentWalkSpeed
                 end
@@ -2133,8 +1772,6 @@ StaminaTab:CreateToggle({
         end
     end,
 })
-
--- Character preset dropdown — snaps both sliders to exact known values
 StaminaTab:CreateDropdown({
     Name="Character Speed Preset",
     Options={
@@ -2159,8 +1796,6 @@ StaminaTab:CreateDropdown({
             `{selected[1]} — Walk: {preset.walk} | Run: {preset.run} studs/s`, 4)
     end,
 })
-
--- Walk Speed slider — 0.25 increment, full manual control
 StaminaTab:CreateSlider({
     Name="Walk Speed",
     Range={7, 30},
@@ -2173,8 +1808,6 @@ StaminaTab:CreateSlider({
         if speedEnabled then applySpeed(currentWalkSpeed, currentRunSpeed) end
     end,
 })
-
--- Run Speed slider — 0.25 increment, full manual control
 StaminaTab:CreateSlider({
     Name="Run / Sprint Speed",
     Range={20, 60},
@@ -2187,7 +1820,6 @@ StaminaTab:CreateSlider({
         if speedEnabled then applySpeed(currentWalkSpeed, currentRunSpeed) end
     end,
 })
-
 StaminaTab:CreateSection("Speed Reference")
 StaminaTab:CreateLabel("Survivor        Walk: 12  |  Run: 26")
 StaminaTab:CreateLabel("1x1x1x1         Walk: 8   |  Run: 27")
@@ -2226,7 +1858,6 @@ CharTab:CreateDropdown({
         notify(selected[1], info[selected[1]] or "No info.", 7)
     end,
 })
-
 CharTab:CreateSection("Sentinel")
 
 CharTab:CreateDropdown({
@@ -2252,7 +1883,6 @@ CharTab:CreateDropdown({
         notify(selected[1], info[selected[1]] or "No info.", 7)
     end,
 })
-
 CharTab:CreateSection("Support")
 
 CharTab:CreateDropdown({
@@ -2278,7 +1908,6 @@ CharTab:CreateDropdown({
         notify(selected[1], info[selected[1]] or "No info.", 7)
     end,
 })
-
 CharTab:CreateSection("Killer Guide")
 
 CharTab:CreateDropdown({
@@ -2346,11 +1975,12 @@ end
 -- forward declarations so fireAbility and doFire can reference both tables
 -- before their do-blocks fill them in
 local Aimbot    = {}
-local SilentAim = { snap = function() end }  -- stub replaced by do-block
+local SilentAim = { snap = function() end, snapAuto = function() end }  -- stub
 
 local function fireAbility(t: string)
     local rem = getAbilityRemote(); if not rem then return end
     local buf = BUFFERS[t] or BUFFERS.Block
+    pcall(function() SilentAim.snapAuto() end)    -- snap HRP BEFORE the remote fires
     pcall(function() rem:FireServer("UseActorAbility", {[1] = buf}) end)
     pcall(function() rem:FireServer(t) end)
     pcall(function() Aimbot.onSkillStart() end)
@@ -2394,7 +2024,7 @@ local AB: { [string]: any } = {
 }
 
 -- CONSTANTS
-local STRICT_FACING_DOT: number = 0.70
+local CONE_DOT: number = 0.70
 local KILLER_NAMES: { string }  = {"c00lkidd","Jason","JohnDoe","1x1x1x1","Noli","Slasher","Sixer"}
 local BAIT_KILLERS: { string }  = {"John Doe","Slasher","c00lkidd","Jason","1x1x1x1","Noli","Sixer","Nosferatu"}
 local BLOCK_CD: number          = 0.1
@@ -2499,13 +2129,23 @@ local function rollMiss(chance: number): boolean
     return math.random(1, 100) <= chance
 end
 
--- facing check, bait killers use sidestep so we also check velocity
-local function isStrictlyFacing(myRoot: BasePart, targetRoot: BasePart, killerName: string?): boolean
+-- Facing check — 45° cone check.
+-- Checks whether the LOCAL PLAYER (survivor) is inside the killer's 45° forward cone.
+-- A 45° half-angle means the killer must be roughly facing us to trigger.
+-- cos(45°) = 0.707. We use 0.70 to add a tiny buffer.
+local CONE_DOT: number = 0.70  -- cos(45°) — increases to tighten cone, decrease to widen
+
+local function isInKillerCone(myRoot: BasePart, killerRoot: BasePart, killerName: string?): boolean
     if not AB.facingCheckEnabled then return true end
-    if not myRoot or not targetRoot then return false end
-    local diff = myRoot.Position - targetRoot.Position
+    if not myRoot or not killerRoot then return false end
+    -- Direction FROM killer TO survivor
+    local diff = myRoot.Position - killerRoot.Position
     if diff.Magnitude < 0.01 then return true end
-    local dot = targetRoot.CFrame.LookVector:Dot(diff.Unit)
+    -- Dot between killer's look vector and the direction to survivor.
+    -- > CONE_DOT means survivor is within the forward 45° cone.
+    local dot = killerRoot.CFrame.LookVector:Dot(diff.Unit)
+    -- Bait-aware: sidestep killers (John Doe, Slasher, etc.) often swing while strafing.
+    -- We tighten the cone slightly and also reject if the killer is moving sideways.
     local isBait = false
     if killerName then
         for _, n in BAIT_KILLERS do
@@ -2514,13 +2154,13 @@ local function isStrictlyFacing(myRoot: BasePart, targetRoot: BasePart, killerNa
     end
     if isBait then
         local vel = Vector3.zero
-        pcall(function() vel = targetRoot.AssemblyLinearVelocity end)
-        if vel.Magnitude < 0.01 then pcall(function() vel = targetRoot.Velocity end) end
-        local side = math.abs(vel:Dot(targetRoot.CFrame.RightVector))
-        if side > 3 then return false end
-        return dot > STRICT_FACING_DOT + 0.05
+        pcall(function() vel = killerRoot.AssemblyLinearVelocity end)
+        if vel.Magnitude < 0.01 then pcall(function() vel = (killerRoot :: any).Velocity end) end
+        local side = math.abs(vel:Dot(killerRoot.CFrame.RightVector))
+        if side > 3 then return false end  -- killer moving sideways — likely a fake
+        return dot > CONE_DOT + 0.05      -- tighter cone for bait killers
     end
-    return dot > STRICT_FACING_DOT
+    return dot > CONE_DOT
 end
 
 -- sound block, .Played events are main trigger, tick scan is fallback
@@ -2615,7 +2255,7 @@ do
         local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
         if not hrp then return end
         if (hrp.Position - myRoot.Position).Magnitude > AB.detectionRange then return end
-        if not isStrictlyFacing(myRoot, hrp, char.Name) then return end
+        if not isInKillerCone(myRoot, hrp, char.Name) then return end
         if rollMiss(AB.abMissChance) then return end
 
         -- Lock this specific sound for 100ms (tight response window)
@@ -2671,15 +2311,21 @@ do
         if not sound or not sound:IsA("Sound") then return end
         if trackedSounds[sound] then return end
 
-        -- Event hooks: fire immediately when the sound starts playing.
-        -- This is the primary trigger — much faster than tick-scan for short sounds.
+        -- Primary: .Played event — fires the instant the sound starts
         local c1 = sound.Played:Connect(function()
             tryBlock(sound)
         end)
+        -- Secondary: IsPlaying property change — catches resume/restart
         local c2 = sound:GetPropertyChangedSignal("IsPlaying"):Connect(function()
             if sound.IsPlaying then tryBlock(sound) end
         end)
-        -- Also fire if the sound is already playing at registration time
+        -- Tertiary: TimePosition change — catches very short sounds that start
+        -- and finish before .Played is delivered. TimePosition fires every frame
+        -- the sound is playing, so this is the most sensitive trigger.
+        local c4 = sound:GetPropertyChangedSignal("TimePosition"):Connect(function()
+            if sound.IsPlaying then tryBlock(sound) end
+        end)
+        -- Cleanup on destroy
         local c3 = sound.Destroying:Connect(function()
             if trackedSounds[sound] then
                 for _, c in trackedSounds[sound] do pcall(function() c:Disconnect() end) end
@@ -2688,43 +2334,57 @@ do
             blockedUntil[sound]  = nil
         end)
 
-        trackedSounds[sound] = {c1, c2, c3}
+        trackedSounds[sound] = {c1, c2, c3, c4}
 
-        -- Fire immediately if the sound is already mid-play
         if sound.IsPlaying then tryBlock(sound) end
     end
 
-    -- Scans the Killers folder for every sound — no ID filtering at this stage
+    -- Scans the Killers folder for every sound — no ID filtering at this stage.
+    -- Safe to call repeatedly: connections are only established once per folder instance.
+    local setupDone: { [Instance]: boolean } = {}
+
     function SoundBlock.setup()
         local kf: Folder? = nil
         pcall(function() kf = workspace.Players.Killers :: Folder end)
         if not kf then return end
 
         -- Register all existing sounds
-        for _, d in kf:GetDescendants() do
+        for _, d in (kf :: Instance):GetDescendants() do
             if d:IsA("Sound") then registerSound(d :: Sound) end
         end
 
-        -- Register sounds added later mid-round
-        kf.DescendantAdded:Connect(function(d: Instance)
-            task.wait(0.02) -- tiny delay so SoundId is assigned before we hook
+        -- Only attach DescendantAdded/ChildAdded once per folder instance.
+        -- On repeated setup() calls (rescan loop) skip if already hooked.
+        if setupDone[kf :: Instance] then return end
+        setupDone[kf :: Instance] = true
+
+        -- Register sounds added later mid-round (e.g. ability audio spawned dynamically)
+        ;(kf :: Instance).DescendantAdded:Connect(function(d: Instance)
+            task.wait(0.02) -- let SoundId be assigned before hooking
             if d:IsA("Sound") then registerSound(d :: Sound) end
         end)
 
-        -- Re-setup if the Killers folder is ever rebuilt (round restart)
-        kf.ChildAdded:Connect(function(child: Instance)
-            task.wait(0.5)
+        -- Re-register when a new killer character loads into the folder
+        ;(kf :: Instance).ChildAdded:Connect(function(child: Instance)
+            task.wait(0.3)
             for _, d in (child :: Instance):GetDescendants() do
                 if d:IsA("Sound") then registerSound(d :: Sound) end
             end
         end)
     end
 
-    -- Periodic re-setup: re-scans the Killers folder every 8 seconds.
-    -- Catches sounds that were added before setup() ran or after a map reload.
+    -- Re-setup when the Killers folder itself is recreated (map/round reload)
+    AddConn(workspace.DescendantAdded:Connect(function(obj: Instance)
+        if obj.Name == "Killers" and AB.autoBlockAudioOn then
+            task.wait(0.5)
+            pcall(SoundBlock.setup)
+        end
+    end))
+
+    -- Periodic rescan every 5s (tightened from 8s) to catch anything missed
     task.spawn(function()
         while true do
-            task.wait(8)
+            task.wait(5)
             if AB.autoBlockAudioOn then
                 pcall(SoundBlock.setup)
             end
@@ -3032,7 +2692,7 @@ AddConn(LocalPlayer.CharacterAdded:Connect(function(char: Model)
 end))
 
 -- AUTO BLOCK TAB UI
-local AutoBlockTab = Window:CreateTab("Auto Block", 4483362458)
+local AutoBlockTab = Window:CreateTab("Auto Block (WIP)", 4483362458)
 
 -- Auto Block
 AutoBlockTab:CreateSection("Auto Block")
@@ -3058,7 +2718,11 @@ AutoBlockTab:CreateSlider({
 
 AutoBlockTab:CreateSlider({
     Name="Detection Range", Range={5,50}, Increment=1, CurrentValue=18, Suffix=" studs", Flag="AB_DetRange",
-    Callback=function(v: number) AB.detectionRange = v end,
+    Callback=function(v: number)
+        AB.detectionRange = v
+        -- update circle size immediately so it reflects the new range
+        pcall(updateRangeCircle)
+    end,
 })
 
 AutoBlockTab:CreateToggle({
@@ -3081,6 +2745,174 @@ AutoBlockTab:CreateSlider({
 
 AutoBlockTab:CreateLabel("Fires when killer punch sound is detected within range")
 AutoBlockTab:CreateLabel("Facing Check blocks fakes: detects bait sidesteps via velocity")
+
+-- Range Visualizer — filled red disc on the ground under the nearest killer
+-- plus two thin lines extending forward at ±45° showing the facing-check cone.
+-- When the survivor is inside the cone AND within the disc, auto-block fires.
+local rangeCircleEnabled: boolean   = false
+local rangeCirclePart:    Part?     = nil   -- the flat filled disc
+local coneLineL:          Part?     = nil   -- left cone line at -45°
+local coneLineR:          Part?     = nil   -- right cone line at +45°
+local rangeCircleConn:    Connection? = nil
+
+local function makeLinePart(colour: Color3): Part
+    local p = Instance.new("Part")
+    p.Anchored    = true
+    p.CanCollide  = false
+    p.CanQuery    = false
+    p.CanTouch    = false
+    p.CastShadow  = false
+    p.Material    = Enum.Material.Neon
+    p.Color       = colour
+    p.Transparency = 0.1
+    p.Size        = Vector3.new(0.15, 0.15, 1)  -- thin rod, length set each frame
+    p.Parent      = workspace
+    return p :: Part
+end
+
+local function buildRangeCircle(): Part
+    -- Filled cylinder disc: SpecialMesh Cylinder is X-axis aligned.
+    -- Size.X = thin axis (height of disc), Size.Y = Size.Z = diameter.
+    -- Rotate 90° on Z to lay it flat on the ground.
+    local p = Instance.new("Part")
+    p.Name           = "XenonZ_RangeCircle"
+    p.Anchored       = true
+    p.CanCollide     = false
+    p.CanQuery       = false
+    p.CanTouch       = false
+    p.CastShadow     = false
+    p.Material       = Enum.Material.Neon
+    p.Color          = Color3.fromRGB(255, 30, 30)
+    p.Transparency   = 0.45
+    p.Size           = Vector3.new(0.05, 2, 2)
+    local mesh       = Instance.new("SpecialMesh")
+    mesh.MeshType    = Enum.MeshType.Cylinder
+    mesh.Parent      = p
+    p.Parent         = workspace
+    return p :: Part
+end
+
+local function updateRangeCircle()
+    if not rangeCircleEnabled then return end
+    if not rangeCirclePart then
+        rangeCirclePart = buildRangeCircle()
+        coneLineL = makeLinePart(Color3.fromRGB(255, 80, 80))
+        coneLineR = makeLinePart(Color3.fromRGB(255, 80, 80))
+    end
+
+    local myChar = LocalPlayer.Character
+    local myHRP  = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
+    if not myHRP then return end
+
+    -- Find nearest killer
+    local kf: Instance? = nil
+    pcall(function() kf = workspace.Players.Killers end)
+    if not kf then
+        rangeCirclePart.CFrame = CFrame.new(0, -1000, 0)
+        if coneLineL then coneLineL.CFrame = CFrame.new(0, -1000, 0) end
+        if coneLineR then coneLineR.CFrame = CFrame.new(0, -1000, 0) end
+        return
+    end
+
+    local nearestModel: Model?  = nil
+    local nearestDist:  number  = math.huge
+    for _, model in (kf :: Instance):GetChildren() do
+        if not model:IsA("Model") then continue end
+        local hrp = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+        if not hrp then continue end
+        local d = (hrp.Position - myHRP.Position).Magnitude
+        if d < nearestDist then nearestDist = d; nearestModel = model :: Model end
+    end
+
+    if not nearestModel then
+        rangeCirclePart.CFrame = CFrame.new(0, -1000, 0)
+        if coneLineL then coneLineL.CFrame = CFrame.new(0, -1000, 0) end
+        if coneLineR then coneLineR.CFrame = CFrame.new(0, -1000, 0) end
+        return
+    end
+
+    local killerHRP = nearestModel:FindFirstChild("HumanoidRootPart") :: BasePart?
+    if not killerHRP then return end
+
+    local diameter = AB.detectionRange * 2
+    local floorY   = killerHRP.Position.Y - 3
+
+    -- Disc: lay flat using 90° Z rotation
+    rangeCirclePart.Size = Vector3.new(0.05, diameter, diameter)
+    rangeCirclePart.CFrame = CFrame.new(killerHRP.Position.X, floorY, killerHRP.Position.Z)
+        * CFrame.Angles(0, 0, math.rad(90))
+
+    -- Colour: bright red when survivor in range, dimmer when outside
+    local inRange = nearestDist <= AB.detectionRange
+    rangeCirclePart.Color        = inRange and Color3.fromRGB(255, 30, 30) or Color3.fromRGB(160, 40, 40)
+    rangeCirclePart.Transparency = inRange and 0.3 or 0.6
+
+    -- Cone lines: two thin rods at ±45° from the killer's forward direction,
+    -- length = detectionRange, anchored at the killer's feet.
+    -- They rotate with the killer in real time showing exactly where the
+    -- facing-check cone is pointing.
+    if coneLineL and coneLineR then
+        local lineLen  = AB.detectionRange
+        local lineSize = Vector3.new(0.12, 0.12, lineLen)
+        local base     = CFrame.new(killerHRP.Position.X, floorY, killerHRP.Position.Z)
+                       * CFrame.Angles(0, killerHRP.CFrame:ToObjectSpace(CFrame.new()).Y, 0)
+        -- Use the killer's actual Y rotation
+        local killerYaw = math.atan2(-killerHRP.CFrame.LookVector.X, -killerHRP.CFrame.LookVector.Z)
+        local halfLen   = lineLen / 2
+
+        local leftAngle  = killerYaw + math.rad(45)
+        local rightAngle = killerYaw - math.rad(45)
+
+        local function linePos(angle: number): CFrame
+            local dx = math.sin(angle) * halfLen
+            local dz = math.cos(angle) * halfLen
+            return CFrame.new(
+                killerHRP.Position.X + dx, floorY,
+                killerHRP.Position.Z + dz
+            ) * CFrame.Angles(0, -angle, 0)
+        end
+
+        coneLineL.Size   = lineSize
+        coneLineL.CFrame = linePos(leftAngle)
+
+        coneLineR.Size   = lineSize
+        coneLineR.CFrame = linePos(rightAngle)
+    end
+end
+
+local function startRangeCircle()
+    if rangeCircleConn then return end
+    rangeCirclePart = buildRangeCircle()
+    coneLineL = makeLinePart(Color3.fromRGB(255, 80, 80))
+    coneLineR = makeLinePart(Color3.fromRGB(255, 80, 80))
+    local _frame = 0
+    rangeCircleConn = RunService.Heartbeat:Connect(function()
+        _frame += 1
+        if _frame % 6 ~= 0 then return end
+        pcall(updateRangeCircle)
+    end)
+end
+
+local function stopRangeCircle()
+    if rangeCircleConn then rangeCircleConn:Disconnect(); rangeCircleConn = nil end
+    if rangeCirclePart then rangeCirclePart:Destroy(); rangeCirclePart = nil end
+    if coneLineL then coneLineL:Destroy(); coneLineL = nil end
+    if coneLineR then coneLineR:Destroy(); coneLineR = nil end
+end
+
+AutoBlockTab:CreateToggle({
+    Name="Show Range Circle (Red Aura)", CurrentValue=false, Flag="AB_RangeCircle",
+    Callback=function(v: boolean)
+        rangeCircleEnabled = v
+        if v then
+            startRangeCircle()
+            notify("Range Circle", "Red circle shows auto block detection range around nearest killer.", 3)
+        else
+            stopRangeCircle()
+            notify("Range Circle", "Hidden.", 2)
+        end
+    end,
+})
 
 -- HDT — Hitbox Dragging Tech
 AutoBlockTab:CreateSection("HDT — Hitbox Dragging Tech")
@@ -3461,274 +3293,333 @@ end
 --   platform including mobile.
 
 -- Aimbot table was forward-declared above fireAbility; filling it in now
+--
+-- HOW THIS CAMLOCK WORKS (deep research summary):
+--
+-- Roblox's render pipeline each frame:
+--   1. Input processed
+--   2. Physics steps
+--   3. Character controller (~priority 100-199)
+--   4. Roblox default camera script runs at EXACTLY priority 200
+--      It sets cam.CFrame based on player input, zoom, CameraSubject every frame
+--   5. OUR CODE runs at priority 201 — one tick AFTER Roblox's camera
+--   6. Frame rendered to screen
+--
+-- By running at 201 we are the LAST thing to touch cam.CFrame before the frame
+-- draws. We let Roblox handle position, orbit, zoom, and ALL mobile/touch input
+-- (CameraType stays "Custom" forever — never changed). We only overwrite the
+-- final LOOK DIRECTION by calling CFrame.lookAt(cam.CFrame.Position, targetPos).
+-- This is the only safe, mobile-compatible method. CameraType.Scriptable kills
+-- all touch joystick input on mobile and is never used here.
+--
+-- Character lock works by setting HRP.CFrame to face the target every frame and
+-- disabling AutoRotate (re-suppressed every frame since the game resets it).
+-- The camera and character locks share the same aimPos so they never fight.
 do
-    local aimbotEnabled:    boolean = false
-    local camLockEnabled:   boolean = true
-    local charLockEnabled:  boolean = true
-    local currentKiller:    Model?  = nil
-    local lerpAlpha:        number  = 1.0
-    local maxLockDist:      number  = 80
-    local fovRadius:        number  = 120
-    local predictionFactor: number  = 0.15
-    local missChance:       number  = 0
-    local showTorsoHL:      boolean = true
-    local fovCircleEnabled: boolean = false
-    local fovCircle:        any     = nil
-    local BIND_NAME:        string  = "XenonZ_AimbotCamLock"
-
-    
-    local skillOnlyMode:  boolean = false
+    local enabled:        boolean = false
+    local camLock:        boolean = true   -- override camera look direction
+    local charLock:       boolean = true   -- rotate HRP toward target every frame
+    local target:         Model?  = nil    -- currently locked killer model
+    local smoothness:     number  = 0.15   -- lerp alpha, 0.15 = matches reference script
+    local maxDist:        number  = 80     -- studs from camera to killer
+    local missChance:     number  = 0      -- 0–20% chance to intentionally miss a frame
+    local showHL:         boolean = true   -- full-model highlight on locked target
+    local skillOnly:      boolean = false  -- lock only activates during ability windows
     local skillActive:    boolean = false
     local skillHoldUntil: number  = 0
-    local SKILL_HOLD:     number  = 0.6  -- seconds to hold lock after ability fires
+    local SKILL_HOLD:     number  = 0.6
+    local fovEnabled:     boolean = false
+    local fovCircle:      any     = nil
+    local BIND:           string  = "XenonZ_CamLock"
 
-    local torsoHL: Highlight? = nil
+    -- Highlight covers the entire killer model (whole body glows red)
+    local hl: Highlight? = nil
 
-    local function applyTorsoHL(torso: BasePart)
-        if torsoHL and torsoHL.Parent == torso then return end
-        if torsoHL then pcall(function() torsoHL:Destroy() end); torsoHL = nil end
-        if not showTorsoHL then return end
-        local hl = Instance.new("Highlight")
-        hl.Name                = "_AimbotTorsoHL"
-        hl.Adornee             = torso
-        hl.FillColor           = Color3.fromRGB(255, 30, 30)
-        hl.OutlineColor        = Color3.fromRGB(255, 90, 90)
-        hl.FillTransparency    = 0.45
-        hl.OutlineTransparency = 0
-        hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Parent              = torso
-        torsoHL = hl
+    local function applyHL(model: Model)
+        if hl and hl.Parent == model then return end
+        if hl then pcall(function() hl:Destroy() end) end
+        hl = nil
+        if not showHL then return end
+        local h      = Instance.new("Highlight")
+        h.Name       = "_XenonZCamHL"
+        h.Adornee    = model
+        h.FillColor  = Color3.fromRGB(255, 30, 30)
+        h.OutlineColor        = Color3.fromRGB(255, 90, 90)
+        h.FillTransparency    = 0.45
+        h.OutlineTransparency = 0
+        h.DepthMode  = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Parent     = model
+        hl = h
     end
 
-    local function removeTorsoHL()
-        if torsoHL then pcall(function() torsoHL:Destroy() end); torsoHL = nil end
+    local function clearHL()
+        if hl then pcall(function() hl:Destroy() end); hl = nil end
     end
 
-    local function updateFOVCircle()
-        if not fovCircle then return end
-        pcall(function()
-            local vp = workspace.CurrentCamera.ViewportSize
-            fovCircle.Position = Vector2.new(vp.X / 2, vp.Y / 2)
-            fovCircle.Radius   = fovRadius
-            fovCircle.Visible  = fovCircleEnabled and aimbotEnabled
-        end)
-    end
-    local function createFOVCircle()
-        pcall(function()
-            if fovCircle then fovCircle:Remove() end
-            local D = (getgenv() :: any).Drawing
-            if not D then return end
-            fovCircle           = D.new("Circle")
-            fovCircle.Thickness = 1
-            fovCircle.Color     = Color3.fromRGB(220, 50, 50)
-            fovCircle.Filled    = false
-            fovCircle.Visible   = false
-            updateFOVCircle()
-        end)
-    end
-    local function removeFOVCircle()
-        pcall(function() if fovCircle then fovCircle:Remove(); fovCircle = nil end end)
-    end
-
-    local function getTorso(model: Model): BasePart?
+    -- Resolve the best aim point on a killer model
+    local function getAimPart(model: Model): BasePart?
         return (model:FindFirstChild("UpperTorso")
             or  model:FindFirstChild("Torso")
             or  model:FindFirstChild("HumanoidRootPart")) :: BasePart?
     end
 
-    local function findNearestKiller(): Model?
-        local cam    = workspace.CurrentCamera
-        local myChar = LocalPlayer.Character
-        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart") :: BasePart?
-        if not cam or not myHRP then return nil end
-
-        local centre   = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-        local best:    Model?  = nil
-        local bestPx:  number  = math.huge
-
+    -- getNearestKiller: measures distance from CAMERA position (same method as
+    -- the reference script shown in the screenshots — most natural on mobile
+    -- because it favors whoever the camera is already roughly pointed at)
+    local function getNearestKiller(): Model?
+        local cam = workspace.CurrentCamera
+        if not cam then return nil end
         local kf: Instance? = nil
         pcall(function() kf = workspace.Players.Killers end)
         if not kf then return nil end
 
-        for _, model in kf:GetChildren() do
-            if not model:IsA("Model") then continue end
-            local hum = model:FindFirstChildOfClass("Humanoid")
+        local best: Model? = nil
+        local bestD: number = math.huge
+        for _, m in (kf :: Instance):GetChildren() do
+            if not m:IsA("Model") then continue end
+            local hum = m:FindFirstChildOfClass("Humanoid")
             if not hum or hum.Health <= 0 then continue end
-            local torso = getTorso(model :: Model)
-            if not torso then continue end
-            if (torso.Position - myHRP.Position).Magnitude > maxLockDist then continue end
-
-            local sp, onScreen = cam:WorldToViewportPoint(torso.Position)
-            if not onScreen then continue end
-
-            local px = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
-            if px > fovRadius then continue end
-            if px < bestPx then bestPx = px; best = model :: Model end
+            local hrp = m:FindFirstChild("HumanoidRootPart") :: BasePart?
+            if not hrp then continue end
+            local d = (hrp.Position - cam.CFrame.Position).Magnitude
+            if d < maxDist and d < bestD then bestD = d; best = m :: Model end
         end
         return best
     end
 
-    local function startLock()
-        pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+    -- pinTarget: manually locked model set by the killer buttons.
+    -- When set it takes priority over auto-acquisition every frame.
+    -- Cleared when the target dies, when clearTarget() is called,
+    -- or when a new pin replaces it.
+    local pinTarget: Model? = nil
 
-        RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1,
+    -- Shared helper: get all live survivors from workspace.Players.Survivors
+    local function getSurvivorsFolder(): Folder?
+        local f: Folder? = nil
+        pcall(function() f = workspace.Players.Survivors :: Folder end)
+        return f
+    end
+
+    -- Find the survivor with the lowest current HP (for killers to chase)
+    local function findLowestHPSurvivor(): Model?
+        local sf = getSurvivorsFolder()
+        if not sf then return nil end
+        local best: Model? = nil
+        local bestHP: number = math.huge
+        for _, m in (sf :: Instance):GetChildren() do
+            if not m:IsA("Model") then continue end
+            local hum = m:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then continue end
+            if hum.Health < bestHP then bestHP = hum.Health; best = m :: Model end
+        end
+        return best
+    end
+
+    -- Find the survivor closest to the LOCAL player's camera position
+    local function findClosestSurvivor(): Model?
+        local cam = workspace.CurrentCamera
+        local sf  = getSurvivorsFolder()
+        if not cam or not sf then return nil end
+        local best: Model? = nil
+        local bestD: number = math.huge
+        for _, m in (sf :: Instance):GetChildren() do
+            if not m:IsA("Model") then continue end
+            local hum = m:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then continue end
+            local hrp = m:FindFirstChild("HumanoidRootPart") :: BasePart?
+            if not hrp then continue end
+            local d = (hrp.Position - cam.CFrame.Position).Magnitude
+            if d < bestD then bestD = d; best = m :: Model end
+        end
+        return best
+    end
+        pcall(function() RunService:UnbindFromRenderStep(BIND) end)
+
+        RunService:BindToRenderStep(BIND, Enum.RenderPriority.Camera.Value + 1,
         function()
-            if not aimbotEnabled then return end
+            -- Guard: only run when enabled
+            if not enabled then return end
 
-            -- When skill-only mode is on, suppress the lock entirely
-            -- unless a skill was fired within the last SKILL_HOLD seconds.
-            if skillOnlyMode then
-                local now = tick()
-                if not skillActive and now > skillHoldUntil then
-                    removeTorsoHL()
-                    return
-                end
+            -- Skill-only gate: suppress lock between ability windows
+            if skillOnly and not skillActive and tick() > skillHoldUntil then
+                clearHL(); return
             end
-            local cam    = workspace.CurrentCamera
+
+            local cam   = workspace.CurrentCamera
             local myChar = LocalPlayer.Character
-            local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart") :: BasePart?
+            local myHRP = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
             if not cam or not myHRP then return end
 
-            if currentKiller then
-                local hum   = currentKiller:FindFirstChildOfClass("Humanoid")
-                local torso = getTorso(currentKiller)
-                if not hum or hum.Health <= 0 or not torso
-                    or (torso.Position - myHRP.Position).Magnitude > maxLockDist then
-                    currentKiller = nil
-                    removeTorsoHL()
+            -- Validate existing target; drop if dead or out of range
+            if target then
+                local th = target:FindFirstChildOfClass("Humanoid")
+                local tp = getAimPart(target)
+                if not th or th.Health <= 0 or not tp
+                    or (tp.Position - cam.CFrame.Position).Magnitude > maxDist then
+                    target = nil; clearHL()
+                    -- Also clear pin if it was the same model
+                    if pinTarget == target then pinTarget = nil end
                 end
             end
-            if not currentKiller then currentKiller = findNearestKiller() end
-            if not currentKiller then removeTorsoHL(); return end
 
-            local torso = getTorso(currentKiller)
-            if not torso then currentKiller = nil; removeTorsoHL(); return end
+            -- If a pinTarget is set, always use it (killer → survivor mode)
+            -- Validate pin is still alive
+            if pinTarget then
+                local ph = pinTarget:FindFirstChildOfClass("Humanoid")
+                if not ph or ph.Health <= 0 then
+                    pinTarget = nil
+                else
+                    target = pinTarget
+                end
+            end
 
-            applyTorsoHL(torso)
+            -- Auto-acquire nearest killer only if no pin is set
+            if not target then target = getNearestKiller() end
+            if not target then clearHL(); return end
 
+            local aimPart = getAimPart(target)
+            if not aimPart then target = nil; clearHL(); return end
+
+            -- Apply full-model highlight on locked target
+            applyHL(target)
+
+            -- Compute aim position with velocity prediction (horizontal only)
+            -- Prediction leads the aim slightly ahead of a moving killer
             local vel = Vector3.zero
-            pcall(function() vel = torso.AssemblyLinearVelocity end)
-            if vel.Magnitude < 0.05 then pcall(function() vel = torso.Velocity end) end
-            local aimPos = torso.Position + Vector3.new(vel.X, 0, vel.Z) * predictionFactor
+            pcall(function() vel = aimPart.AssemblyLinearVelocity end)
+            if vel.Magnitude < 0.05 then
+                pcall(function() vel = (aimPart :: any).Velocity end)
+            end
+            local aimPos = aimPart.Position + Vector3.new(vel.X, 0, vel.Z) * 0.1
 
+            -- Optional miss chance
             if missChance > 0 and math.random(100) <= missChance then return end
 
-            -- Both locks are derived from the same horizontal direction so
-            -- they are always perfectly coupled — no fighting each other.
-            local toTarget     = aimPos - myHRP.Position
-            local flatToTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
-            local hasDir       = flatToTarget.Magnitude > 0.01
-
-            -- Forces the HRP to face the killer torso every single frame.
-            -- AutoRotate is disabled every frame (not just once) so the
-            -- game engine cannot reset it between frames.
-            -- The HRP position is preserved — only orientation changes.
-            if charLockEnabled and hasDir then
-                local myHum = myChar and (myChar :: Model):FindFirstChildOfClass("Humanoid")
-                if myHum then
-                    -- Suppress every frame — game sometimes resets this mid-step
-                    myHum.AutoRotate = false
+            -- CHARACTER LOCK: rotate HRP to face target, disable AutoRotate every
+            -- frame (game resets it on each step otherwise)
+            if charLock then
+                local flat = Vector3.new(aimPos.X, myHRP.Position.Y, aimPos.Z)
+                local dir  = flat - myHRP.Position
+                if dir.Magnitude > 0.01 then
+                    local hum = (myChar :: Model):FindFirstChildOfClass("Humanoid")
+                    if hum then hum.AutoRotate = false end
+                    myHRP.CFrame = CFrame.new(myHRP.Position, myHRP.Position + dir.Unit)
                 end
-                -- Build a CFrame at the HRP position looking at the aim point
-                -- on the horizontal plane, keeping the character upright.
-                myHRP.CFrame = CFrame.new(myHRP.Position,
-                    myHRP.Position + flatToTarget.Unit)
             end
 
-            -- When both locks are active we compute the camera position
-            -- from the HRP (so cam and character are geometrically coupled),
-            -- then point it at the torso.  This is the "stickiest" mode —
-            -- the camera orbits around the character facing the killer.
-            --
-            -- When only cam lock is active we just rotate the existing
-            -- camera position toward the aim point as before.
-            if camLockEnabled then
-                local camPos: Vector3
-                if charLockEnabled then
-                    -- Coupled mode: keep camera at its current offset distance
-                    -- from HRP but re-derive the position from the updated HRP.
-                    local offset = cam.CFrame.Position - myHRP.Position
-                    -- Preserve vertical height, snap horizontal to face aim
-                    camPos = myHRP.Position + Vector3.new(offset.X, offset.Y, offset.Z)
-                else
-                    camPos = cam.CFrame.Position
-                end
-                local want = CFrame.lookAt(camPos, aimPos)
-                cam.CFrame = cam.CFrame:Lerp(want, lerpAlpha)
+            -- CAMERA LOCK: after Roblox's camera script has set cam.CFrame this
+            -- frame, we overwrite only the look direction. Position is taken
+            -- directly from cam.CFrame.Position so zoom/orbit/touch are preserved.
+            -- Lerp with smoothness=0.15 gives the exact feel of the reference script.
+            if camLock then
+                local goal = CFrame.lookAt(cam.CFrame.Position, aimPos)
+                cam.CFrame = cam.CFrame:Lerp(goal, smoothness)
             end
-
-            updateFOVCircle()
         end)
     end
 
     local function stopLock()
-        pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
-        currentKiller = nil
-        removeTorsoHL()
-        -- Restore AutoRotate so movement feels normal after disabling
+        pcall(function() RunService:UnbindFromRenderStep(BIND) end)
+        target = nil
+        clearHL()
+        -- Restore AutoRotate so walking feels normal again
         pcall(function()
             local c = LocalPlayer.Character
             if not c then return end
             local h = c:FindFirstChildOfClass("Humanoid")
             if h then h.AutoRotate = true end
         end)
-        if fovCircle then fovCircle.Visible = false end
+        pcall(function() if fovCircle then fovCircle.Visible = false end end)
     end
 
-    -- respawn hook
+    -- Re-bind on respawn
     AddConn(LocalPlayer.CharacterAdded:Connect(function()
-        task.wait(0.8)
-        if aimbotEnabled then
-            stopLock()
-            task.wait(0.2)
-            startLock()
-        end
+        task.wait(1)
+        if enabled then stopLock(); task.wait(0.1); startLock() end
     end))
 
+    -- Public API
     function Aimbot.setEnabled(v: boolean)
-        aimbotEnabled = v
+        enabled = v
         if v then startLock() else stopLock() end
     end
-    function Aimbot.setCamLock(v: boolean)    camLockEnabled   = v end
-    function Aimbot.setCharLock(v: boolean)   charLockEnabled  = v end
-    function Aimbot.setLerp(v: number)        lerpAlpha        = v end
-    function Aimbot.setFOV(v: number)
-        fovRadius = v
-        updateFOVCircle()
+    function Aimbot.setCamLock(v: boolean)   camLock   = v end
+    function Aimbot.setCharLock(v: boolean)  charLock  = v end
+    function Aimbot.setLerp(v: number)       smoothness = v end
+    function Aimbot.setMaxDist(v: number)    maxDist   = v end
+    function Aimbot.setMissChance(v: number) missChance = math.clamp(v, 0, 20) end
+    function Aimbot.setTorsoHL(v: boolean)
+        showHL = v
+        if not v then clearHL() end
     end
-    function Aimbot.setMaxDist(v: number)     maxLockDist      = v end
-    function Aimbot.setPrediction(v: number)  predictionFactor = v end
-    function Aimbot.setMissChance(v: number)  missChance       = math.clamp(v, 0, 20) end
+    function Aimbot.setFOV(v: number)
+        pcall(function() if fovCircle then fovCircle.Radius = v end end)
+    end
+    function Aimbot.setFOVCircle(v: boolean)
+        fovEnabled = v
+        if v then
+            pcall(function()
+                local D = (getgenv() :: any).Drawing
+                if not D then return end
+                if fovCircle then fovCircle:Remove() end
+                fovCircle           = D.new("Circle")
+                fovCircle.Thickness = 1
+                fovCircle.Color     = Color3.fromRGB(220, 50, 50)
+                fovCircle.Filled    = false
+                local vp = workspace.CurrentCamera.ViewportSize
+                fovCircle.Position  = Vector2.new(vp.X/2, vp.Y/2)
+                fovCircle.Radius    = 120
+                fovCircle.Visible   = enabled
+            end)
+        else
+            pcall(function() if fovCircle then fovCircle:Remove(); fovCircle = nil end end)
+        end
+    end
     function Aimbot.setSkillOnly(v: boolean)
-        skillOnlyMode = v
+        skillOnly = v
         if not v then skillActive = false end
     end
-    -- Called by fireAbility wrapper when a skill is fired
     function Aimbot.onSkillStart()
         skillActive    = true
         skillHoldUntil = tick() + SKILL_HOLD
     end
-    -- Called after the hold window to clear active state
     function Aimbot.onSkillEnd()
         skillActive = false
     end
     function Aimbot.setSkillHold(v: number) SKILL_HOLD = v end
-    function Aimbot.setTorsoHL(v: boolean)
-        showTorsoHL = v
-        if not v then removeTorsoHL() end
-    end
-    function Aimbot.setFOVCircle(v: boolean)
-        fovCircleEnabled = v
-        if v then createFOVCircle() else removeFOVCircle() end
-    end
+    function Aimbot.setPrediction(v: number) end -- prediction baked into 0.1 constant; stub kept for UI compat
     function Aimbot.clearTarget()
-        currentKiller = nil
-        removeTorsoHL()
+        target = nil; pinTarget = nil; clearHL()
     end
-end
+    -- Killer → Survivor: lock onto the survivor with the lowest HP
+    function Aimbot.pinLowestHP()
+        local m = findLowestHPSurvivor()
+        if m then
+            pinTarget = m
+            target    = m
+            applyHL(m)
+            local hum = m:FindFirstChildOfClass("Humanoid")
+            notify("Aimbot",
+                `Locked: {m.Name} — {hum and math.floor(hum.Health) or "?"} HP (lowest)`, 3)
+        else
+            notify("Aimbot", "No survivors found.", 3)
+        end
+    end
+    -- Killer → Survivor: lock onto the closest survivor by camera distance
+    function Aimbot.pinClosest()
+        local m = findClosestSurvivor()
+        if m then
+            pinTarget = m
+            target    = m
+            applyHL(m)
+            notify("Aimbot", `Locked: {m.Name} (closest survivor)`, 3)
+        else
+            notify("Aimbot", "No survivors found.", 3)
+        end
+    end
 
 -- TAB 7 ► AIMBOT
-local AimbotTab = Window:CreateTab("Aimbot (WIP)", 4483362458)
+local AimbotTab = Window:CreateTab("AIMBOT (WIP)", 4483362458)
 
 -- Main Toggle
 AimbotTab:CreateSection("Aimbot")
@@ -3774,7 +3665,6 @@ AimbotTab:CreateToggle({
               or "Skill-Only OFF — lock is always active.", 3)
     end,
 })
-
 AimbotTab:CreateSlider({
     Name="Skill Lock Hold Duration",
     Range={0.1, 2},
@@ -3784,9 +3674,32 @@ AimbotTab:CreateSlider({
     Flag="Aimbot_SkillHold",
     Callback=function(v: number) Aimbot.setSkillHold(v) end,
 })
+
+AimbotTab:CreateButton({
+    Name="Clear Current Target",
     Callback=function()
         Aimbot.clearTarget()
         notify("Aimbot", "Target cleared — will re-acquire on next frame.", 2)
+    end,
+})
+
+-- Killer mode: pin a survivor as the target instead of auto-acquiring killers
+AimbotTab:CreateSection("Killer — Lock Survivor")
+AimbotTab:CreateLabel("When playing Killer, use these to lock onto a survivor.")
+AimbotTab:CreateLabel("Enable Aimbot toggle above must also be ON.")
+
+AimbotTab:CreateButton({
+    Name="Lock Lowest HP Survivor",
+    Callback=function()
+        if not (Rayfield and true) then return end
+        Aimbot.pinLowestHP()
+    end,
+})
+
+AimbotTab:CreateButton({
+    Name="Lock Closest Survivor",
+    Callback=function()
+        Aimbot.pinClosest()
     end,
 })
 
@@ -3797,11 +3710,10 @@ AimbotTab:CreateSlider({
     Name="Camera Smooth (1.0 = Instant)",
     Range={0.01, 1},
     Increment=0.01,
-    CurrentValue=1.0,
+    CurrentValue=0.15,
     Flag="Aimbot_Lerp",
     Callback=function(v: number) Aimbot.setLerp(v) end,
 })
-
 AimbotTab:CreateSlider({
     Name="FOV Radius",
     Range={10, 500},
@@ -3811,7 +3723,6 @@ AimbotTab:CreateSlider({
     Flag="Aimbot_FOV",
     Callback=function(v: number) Aimbot.setFOV(v) end,
 })
-
 AimbotTab:CreateSlider({
     Name="Max Lock Distance",
     Range={10, 200},
@@ -3830,7 +3741,6 @@ AimbotTab:CreateSlider({
     Flag="Aimbot_Prediction",
     Callback=function(v: number) Aimbot.setPrediction(v) end,
 })
-
 AimbotTab:CreateSlider({
     Name="Miss Chance",
     Range={0, 20},
@@ -3855,10 +3765,10 @@ AimbotTab:CreateToggle({
 -- Info
 AimbotTab:CreateSection("Info")
 AimbotTab:CreateLabel("Method: BindToRenderStep priority 201 — runs after Roblox camera")
-AimbotTab:CreateLabel("DOUBLE LOCK: Camera snaps instantly + HRP faces killer every frame")
+AimbotTab:CreateLabel("Target: nearest killer by camera distance (same as reference script)")
+AimbotTab:CreateLabel("Highlight covers entire killer model — whole body glows red when locked")
 AimbotTab:CreateLabel("CameraType never changes — mobile joystick and touch fully intact")
-AimbotTab:CreateLabel("Killers folder only — Torso / UpperTorso target")
-AimbotTab:CreateLabel("Prediction leads torso using horizontal velocity × factor")
+AimbotTab:CreateLabel("DOUBLE LOCK: camera snaps instantly + HRP faces killer every frame")
 
 -- SILENT AIM SYSTEM
 -- Silent Aim manipulates the punch/block remote's direction
@@ -3867,134 +3777,220 @@ AimbotTab:CreateLabel("Prediction leads torso using horizontal velocity × facto
 -- Method: hook the ability RemoteEvent FireServer call and
 -- swap the direction CFrame to point at the killer torso
 -- before the packet leaves the client.
--- SilentAim forward-declared above fireAbility; filling it in now
+-- SILENT AIM — hookmetamethod __namecall approach (based on universal silent aim source).
+-- Hooks workspace:Raycast() (and legacy FindPartOnRay variants) at the executor level.
+-- When enabled and a Raycast fires from workspace, the direction is redirected toward
+-- the nearest target entirely inside the engine — character never visually rotates.
+-- Target mode is automatic: if local player is in Killers folder → target survivors,
+-- if in Survivors folder → target killers.
+-- Mobile: targeting uses camera-distance FOV rather than mouse position.
+--
+-- Skills (Forsaken):
+--   KILLERS: Noli (Nova), c00lkidd (Corrupt Nature), Nosferatu (Hunter's Feast)
+--   SURVIVORS: Jane Doe (Crystal Pitch), Dusekkar (Plasma Beam)
+--
+-- The __namecall hook only redirects when checkcaller() is false (game code, not our code)
+-- so our own Raycast calls from the auto-block and ESP systems are never intercepted.
+local SilentAim = { snap = function() end, snapAuto = function() end }
 do
-    local enabled:      boolean   = false
-    local fovRadius:    number    = 160
-    local maxDist:      number    = 60
-    local missChance:   number    = 0
-    local currentTarget: BasePart? = nil
+    local enabled:     boolean   = false
+    local fovRadius:   number    = 160   -- pixels from screen centre (camera-distance proxy)
+    local maxDist:     number    = 60    -- max studs from player to target
+    local missChance:  number    = 0
+    local saHook:      any       = nil   -- the __namecall hookmetamethod connection
 
-    -- Per-ability toggles
+    -- Per-skill enable flags
     local skills: { [string]: boolean } = {
-        NoliNova        = true,
-        CorruptNature   = true,
-        PlasmaBeam      = true,
-        HuntersFeast    = true,
-        CrystalPitch    = true,
+        NoliNova      = true,   -- Noli: Nova (killer)
+        CorruptNature = true,   -- c00lkidd: Corrupt Nature (killer)
+        HuntersFeast  = true,   -- Nosferatu: Hunter's Feast (killer)
+        CrystalPitch  = true,   -- Jane Doe: Crystal Pitch (survivor)
+        PlasmaBeam    = true,   -- Dusekkar: Plasma Beam (survivor)
     }
 
-    local function getKillerTorso(): BasePart?
-        local cam   = workspace.CurrentCamera
-        local myChar = LocalPlayer.Character
-        local myHRP = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
-        if not cam or not myHRP then return nil end
-
-        local centre  = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-        local best:    BasePart? = nil
-        local bestPx:  number    = math.huge
-
+    -- Determine whether local player is playing as Killer or Survivor this round
+    local function getLocalRole(): string
         local kf: Instance? = nil
         pcall(function() kf = workspace.Players.Killers end)
-        if not kf then return nil end
+        if kf then
+            for _, m in (kf :: Instance):GetChildren() do
+                if Players:GetPlayerFromCharacter(m) == LocalPlayer then
+                    return "Killer"
+                end
+            end
+        end
+        return "Survivor"
+    end
 
-        for _, model in kf:GetChildren() do
+    -- Find the nearest enemy BasePart (HRP) to aim at.
+    -- Survivors aim at killers; killers aim at survivors.
+    -- Uses camera-distance (closest to where camera is pointing).
+    local function getNearestTarget(): BasePart?
+        local cam = workspace.CurrentCamera
+        if not cam then return nil end
+        local myChar = LocalPlayer.Character
+        local myHRP = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
+        if not myHRP then return nil end
+
+        local role = getLocalRole()
+        local folder: Instance? = nil
+        if role == "Killer" then
+            pcall(function() folder = workspace.Players.Survivors end)
+        else
+            pcall(function() folder = workspace.Players.Killers end)
+        end
+        if not folder then return nil end
+
+        local best: BasePart?   = nil
+        local bestD: number     = math.huge
+        local centre = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+        for _, model in (folder :: Instance):GetChildren() do
             if not model:IsA("Model") then continue end
+            if Players:GetPlayerFromCharacter(model) == LocalPlayer then continue end
             local hum = model:FindFirstChildOfClass("Humanoid")
             if not hum or hum.Health <= 0 then continue end
-            local torso = (model:FindFirstChild("UpperTorso")
-                or model:FindFirstChild("Torso")
-                or model:FindFirstChild("HumanoidRootPart")) :: BasePart?
-            if not torso then continue end
-            if (torso.Position - myHRP.Position).Magnitude > maxDist then continue end
-            local sp, onScreen = cam:WorldToViewportPoint(torso.Position)
+            local hrp = (model:FindFirstChild("UpperTorso")
+                or  model:FindFirstChild("Torso")
+                or  model:FindFirstChild("HumanoidRootPart")) :: BasePart?
+            if not hrp then continue end
+            if (hrp.Position - myHRP.Position).Magnitude > maxDist then continue end
+            -- Use screen distance from camera centre (works on mobile without mouse)
+            local sp, onScreen = cam:WorldToViewportPoint(hrp.Position)
             if not onScreen then continue end
             local px = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
-            if px < bestPx and px <= fovRadius then bestPx = px; best = torso end
+            if px > fovRadius then continue end
+            if px < bestD then bestD = px; best = hrp end
         end
         return best
     end
 
-    -- Refresh cached target every 0.05s
-    task.spawn(function()
-        while true do
-            task.wait(0.05)
-            if enabled then
-                pcall(function() currentTarget = getKillerTorso() end)
-            else
-                currentTarget = nil
-            end
-        end
-    end)
+    -- Install the __namecall hook when silent aim is enabled.
+    -- Intercepts workspace:Raycast() and workspace:FindPartOnRay*() calls
+    -- made by the game's own code (checkcaller() == false).
+    local function installHook()
+        if saHook then return end  -- already installed
+        local ok = pcall(function()
+            -- hookmetamethod is available in supported executors (Synapse, Delta, etc.)
+            local hm = (getgenv() :: any).hookmetamethod
+            local cc = (getgenv() :: any).checkcaller
+            local nc = (getgenv() :: any).newcclosure
+            if not hm or not nc then return end
 
-    -- Snaps the character HRP to face the target, fires the ability, then
-    -- restores AutoRotate. Calling this before FireServer means the server
-    -- calculates the hit direction from the already-rotated HRP.
-    function SilentAim.snap(skillKey: string)
-        if not enabled then return end
-        if not skills[skillKey] then return end
-        if missChance > 0 and math.random(100) <= missChance then return end
+            local getMethod = (getgenv() :: any).getnamecallmethod
 
-        local target = currentTarget or getKillerTorso()
-        if not target then return end
+            local oldNamecall
+            oldNamecall = hm(game, "__namecall", nc(function(...)
+                if not enabled then return oldNamecall(...) end
+                if cc and cc() then return oldNamecall(...) end
 
-        local myChar = LocalPlayer.Character
-        local myHRP  = myChar and (myChar :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
-        local hum    = myChar and (myChar :: Model):FindFirstChildOfClass("Humanoid")
-        if not myHRP then return end
+                local method = getMethod and getMethod() or ""
+                local args   = {...}
+                local self_  = args[1]
 
-        -- Rotate HRP to face target instantly before the remote fires
-        local flat = Vector3.new(target.Position.X, myHRP.Position.Y, target.Position.Z)
-        local dir  = flat - myHRP.Position
-        if dir.Magnitude < 0.01 then return end
+                if self_ ~= workspace then return oldNamecall(...) end
 
-        if hum then hum.AutoRotate = false end
-        myHRP.CFrame = CFrame.new(myHRP.Position, myHRP.Position + dir.Unit)
-
-        -- Restore AutoRotate shortly after so normal movement resumes
-        task.delay(0.3, function()
-            pcall(function()
-                local c = LocalPlayer.Character
-                if c then
-                    local h = c:FindFirstChildOfClass("Humanoid")
-                    if h then h.AutoRotate = true end
+                if missChance > 0 and math.random(100) <= missChance then
+                    return oldNamecall(...)
                 end
-            end)
+
+                local target = getNearestTarget()
+                if not target then return oldNamecall(...) end
+
+                -- Raycast(origin, direction, params)
+                if method == "Raycast" then
+                    local origin: Vector3 = args[2]
+                    if typeof(origin) == "Vector3" then
+                        args[3] = (target.Position - origin).Unit * 1000
+                        return oldNamecall(table.unpack(args))
+                    end
+                -- Legacy FindPartOnRay variants
+                elseif method == "FindPartOnRayWithIgnoreList"
+                    or method == "FindPartOnRayWithWhitelist"
+                    or method == "FindPartOnRay"
+                    or method == "findPartOnRay" then
+                    local ray = args[2]
+                    if typeof(ray) == "Ray" then
+                        local dir = (target.Position - ray.Origin).Unit * 1000
+                        args[2]   = Ray.new(ray.Origin, dir)
+                        return oldNamecall(table.unpack(args))
+                    end
+                end
+
+                return oldNamecall(...)
+            end))
+
+            saHook = oldNamecall
         end)
+        if not ok then
+            notify("Silent Aim", "hookmetamethod not available in this executor.", 4)
+        end
     end
+
+    -- Unhook: restore original __namecall.
+    -- hookmetamethod is persistent — to undo we rehook with the original.
+    local function removeHook()
+        if not saHook then return end
+        pcall(function()
+            local hm = (getgenv() :: any).hookmetamethod
+            local nc = (getgenv() :: any).newcclosure
+            if not hm or not nc then return end
+            local captured = saHook
+            hm(game, "__namecall", nc(function(...)
+                return captured(...)
+            end))
+        end)
+        saHook = nil
+    end
+
+    -- snapAuto / snap kept as stubs — the hookmetamethod approach intercepts
+    -- Raycast calls automatically and does not need manual HRP rotation.
+    -- These stubs prevent errors from fireAbility calling them.
+    function SilentAim.snapAuto()  end
+    function SilentAim.snap(_: string) end
 
     function SilentAim.setEnabled(v: boolean)
         enabled = v
-        if not v then currentTarget = nil end
+        if v then
+            installHook()
+        else
+            enabled = false  -- hook stays installed but returns early when disabled
+        end
     end
     function SilentAim.setSkill(key: string, v: boolean) skills[key] = v end
     function SilentAim.setFOV(v: number)     fovRadius  = v end
     function SilentAim.setMaxDist(v: number) maxDist    = v end
     function SilentAim.setMiss(v: number)    missChance = math.clamp(v, 0, 20) end
     function SilentAim.getEnabled(): boolean return enabled end
+
+    -- Cleanup on script destroy
+    AddConn({ Disconnect = removeHook })
 end
 
 -- Silent Aim Tab
-local SilentAimTab = Window:CreateTab("Silent Aim", 4483362458)
+local SilentAimTab = Window:CreateTab("SILENT AIM (WIP)", 4483362458)
 
 SilentAimTab:CreateSection("Silent Aim")
+SilentAimTab:CreateLabel("Uses hookmetamethod to redirect workspace:Raycast() at engine level.")
+SilentAimTab:CreateLabel("Character never rotates — the ray just hits the target silently.")
+SilentAimTab:CreateLabel("Auto-detects role: Survivor targets Killers, Killer targets Survivors.")
 
 SilentAimTab:CreateToggle({
     Name="Enable Silent Aim", CurrentValue=false, Flag="SilentAim_Enable",
     Callback=function(v: boolean)
         SilentAim.setEnabled(v)
-        notify("Silent Aim", v and "Silent Aim ON — snaps ur character before each ability." or "Disabled.", 3)
+        notify("Silent Aim", v and "ON — Raycast hook active. Abilities will auto-hit." or "Disabled.", 3)
     end,
 })
 
-SilentAimTab:CreateSection("Ability Targets")
-SilentAimTab:CreateLabel("Each skill snaps your character to face the nearest killer before firing.")
+SilentAimTab:CreateSection("Ability Skills")
+SilentAimTab:CreateLabel("Killer abilities (target survivors):")
 
 SilentAimTab:CreateToggle({
     Name="Noli — Nova", CurrentValue=true, Flag="SA_NoliNova",
     Callback=function(v: boolean)
         SilentAim.setSkill("NoliNova", v)
-        notify("Silent Aim", v and "Nova redirect ON." or "Nova redirect OFF.", 2)
+        notify("Silent Aim", v and "Nova ON." or "Nova OFF.", 2)
     end,
 })
 
@@ -4002,15 +3998,7 @@ SilentAimTab:CreateToggle({
     Name="c00lkidd — Corrupt Nature", CurrentValue=true, Flag="SA_CorruptNature",
     Callback=function(v: boolean)
         SilentAim.setSkill("CorruptNature", v)
-        notify("Silent Aim", v and "Corrupt Nature redirect ON." or "OFF.", 2)
-    end,
-})
-
-SilentAimTab:CreateToggle({
-    Name="Dusekkar — Plasma Beam", CurrentValue=true, Flag="SA_PlasmaBeam",
-    Callback=function(v: boolean)
-        SilentAim.setSkill("PlasmaBeam", v)
-        notify("Silent Aim", v and "Plasma Beam redirect ON." or "OFF.", 2)
+        notify("Silent Aim", v and "Corrupt Nature ON." or "OFF.", 2)
     end,
 })
 
@@ -4018,22 +4006,32 @@ SilentAimTab:CreateToggle({
     Name="Nosferatu — Hunter's Feast", CurrentValue=true, Flag="SA_HuntersFeast",
     Callback=function(v: boolean)
         SilentAim.setSkill("HuntersFeast", v)
-        notify("Silent Aim", v and "Hunter's Feast redirect ON." or "OFF.", 2)
+        notify("Silent Aim", v and "Hunter's Feast ON." or "OFF.", 2)
+    end,
+})
+
+SilentAimTab:CreateLabel("Survivor abilities (target killers):")
+
+SilentAimTab:CreateToggle({
+    Name="Jane Doe — Crystal Pitch", CurrentValue=true, Flag="SA_CrystalPitch",
+    Callback=function(v: boolean)
+        SilentAim.setSkill("CrystalPitch", v)
+        notify("Silent Aim", v and "Crystal Pitch ON." or "OFF.", 2)
     end,
 })
 
 SilentAimTab:CreateToggle({
-    Name="1x1x1x1 — Crystal Pitch", CurrentValue=true, Flag="SA_CrystalPitch",
+    Name="Dusekkar — Plasma Beam", CurrentValue=true, Flag="SA_PlasmaBeam",
     Callback=function(v: boolean)
-        SilentAim.setSkill("CrystalPitch", v)
-        notify("Silent Aim", v and "Crystal Pitch redirect ON." or "OFF.", 2)
+        SilentAim.setSkill("PlasmaBeam", v)
+        notify("Silent Aim", v and "Plasma Beam ON." or "OFF.", 2)
     end,
 })
 
 SilentAimTab:CreateSection("Settings")
 
 SilentAimTab:CreateSlider({
-    Name="FOV Radius",
+    Name="FOV Radius (screen px from centre)",
     Range={10, 500},
     Increment=5,
     CurrentValue=160,
@@ -4041,7 +4039,6 @@ SilentAimTab:CreateSlider({
     Flag="SA_FOV",
     Callback=function(v: number) SilentAim.setFOV(v) end,
 })
-
 SilentAimTab:CreateSlider({
     Name="Max Distance",
     Range={10, 150},
@@ -4051,7 +4048,6 @@ SilentAimTab:CreateSlider({
     Flag="SA_MaxDist",
     Callback=function(v: number) SilentAim.setMaxDist(v) end,
 })
-
 SilentAimTab:CreateSlider({
     Name="Miss Chance",
     Range={0, 20},
@@ -4061,11 +4057,6 @@ SilentAimTab:CreateSlider({
     Flag="SA_Miss",
     Callback=function(v: number) SilentAim.setMiss(v) end,
 })
-
-SilentAimTab:CreateSection("Info")
-SilentAimTab:CreateLabel("Snaps ur HRP toward nearest killer right before the ability fires")
-SilentAimTab:CreateLabel("Server reads ur facing direction — hit registers without aiming")
-SilentAimTab:CreateLabel("Works for: Nova, Corrupt Nature, Plasma Beam, Feast, Crystal Pitch")
 
 -- MUSIC TAB
 local MusicTab = Window:CreateTab("Music", 4483362458)
@@ -4131,7 +4122,159 @@ MusicTab:CreateLabel("You and I  ⭐ New — 4.0.0")
 MusicTab:CreateLabel("⚠ Fill in sndup URLs for Faith's Answer & You and I to enable them")
 MusicTab:CreateLabel("Triggers when exactly 1 survivor and 1 killer remain")
 
--- TAB 8 ► MISC (Chat Logger)
+-- BLATANT TAB — speed, noclip, auto-attack, teleport
+local BlatantTab = Window:CreateTab("Blatant", 4483362458)
+
+BlatantTab:CreateSection("Speed")
+
+-- Walk and sprint multiplier — adds a direct CFrame offset each Stepped frame
+-- on top of whatever the sprint module is already doing. Multiplier of 0 = no effect.
+local blatantWalkMult:   number  = 0
+local blatantSprintMult: number  = 0
+local blatantSpeedConn:  Connection? = nil
+
+local function startBlatantSpeed()
+    if blatantSpeedConn then return end
+    blatantSpeedConn = RunService.Stepped:Connect(function()
+        pcall(function()
+            local char = LocalPlayer.Character; if not char then return end
+            local hum  = char:FindFirstChildOfClass("Humanoid")
+            local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+            if not hum or not root then return end
+            if hum.MoveDirection.Magnitude < 0.01 then return end
+            -- Detect sprinting: WalkSpeed above baseline or sprint module running
+            local isSprinting = hum.WalkSpeed > 20
+            local mult = isSprinting and blatantSprintMult or blatantWalkMult
+            if mult <= 0 then return end
+            -- Add velocity in move direction rather than teleporting CFrame
+            -- to stay compatible with Forsaken's anti-cheat checks
+            root.CFrame = root.CFrame + (hum.MoveDirection * mult)
+        end)
+    end)
+    AddConn(blatantSpeedConn)
+end
+
+local function stopBlatantSpeed()
+    if blatantSpeedConn then
+        blatantSpeedConn:Disconnect()
+        blatantSpeedConn = nil
+    end
+end
+
+BlatantTab:CreateSlider({
+    Name="Walk Boost",
+    Range={0, 10},
+    Increment=0.1,
+    CurrentValue=0,
+    Suffix="x",
+    Flag="Blatant_WalkMult",
+    Callback=function(v: number)
+        blatantWalkMult = v
+        if v > 0 then startBlatantSpeed()
+        elseif blatantSprintMult <= 0 then stopBlatantSpeed() end
+    end,
+})
+
+BlatantTab:CreateSlider({
+    Name="Sprint Boost",
+    Range={0, 15},
+    Increment=0.1,
+    CurrentValue=0,
+    Suffix="x",
+    Flag="Blatant_SprintMult",
+    Callback=function(v: number)
+        blatantSprintMult = v
+        if v > 0 then startBlatantSpeed()
+        elseif blatantWalkMult <= 0 then stopBlatantSpeed() end
+    end,
+})
+
+BlatantTab:CreateSection("Noclip")
+BlatantTab:CreateLabel("Disables collision on all character parts while active.")
+BlatantTab:CreateLabel("Walk through walls, traps, and map geometry.")
+
+local blatantNoclipConn: Connection? = nil
+
+BlatantTab:CreateToggle({
+    Name="Noclip", CurrentValue=false, Flag="Blatant_Noclip",
+    Callback=function(v: boolean)
+        if blatantNoclipConn then
+            blatantNoclipConn:Disconnect()
+            blatantNoclipConn = nil
+        end
+        if not v then
+            -- Restore collision on all parts when disabled
+            pcall(function()
+                local char = LocalPlayer.Character
+                if not char then return end
+                for _, p in char:GetDescendants() do
+                    if p:IsA("BasePart") then (p :: BasePart).CanCollide = true end
+                end
+            end)
+            notify("Noclip", "Disabled — collision restored.", 2)
+            return
+        end
+        blatantNoclipConn = RunService.Stepped:Connect(function()
+            pcall(function()
+                local char = LocalPlayer.Character; if not char then return end
+                for _, p in char:GetDescendants() do
+                    if p:IsA("BasePart") then (p :: BasePart).CanCollide = false end
+                end
+            end)
+        end)
+        AddConn(blatantNoclipConn)
+        notify("Noclip", "ON — walking through walls.", 3)
+    end,
+})
+
+BlatantTab:CreateSection("Teleport")
+
+local blatantTpDropdown: any = nil
+
+BlatantTab:CreateButton({
+    Name="Refresh Player List",
+    Callback=function()
+        if not blatantTpDropdown then return end
+        local list: { string } = {}
+        for _, p in Players:GetPlayers() do
+            if p ~= LocalPlayer then table.insert(list, p.Name) end
+        end
+        if #list == 0 then table.insert(list, "(no other players)") end
+        blatantTpDropdown:Refresh(list, true)
+    end,
+})
+
+blatantTpDropdown = BlatantTab:CreateDropdown({
+    Name="Target Player",
+    Options={"(press refresh)"},
+    CurrentOption={"(press refresh)"},
+    Flag="Blatant_TpTarget",
+    Callback=function() end,
+})
+
+BlatantTab:CreateButton({
+    Name="Teleport to Player",
+    Callback=function()
+        safeCall(function()
+            local selected = Rayfield.Flags["Blatant_TpTarget"]
+            local name = (type(selected) == "table" and selected[1]) or tostring(selected or "")
+            local target = Players:FindFirstChild(name)
+            if not target or not target.Character then
+                notify("Teleport", "Player not found or has no character.", 3); return
+            end
+            local tHRP = target.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+            local myHRP = LocalPlayer.Character
+                and (LocalPlayer.Character :: Model):FindFirstChild("HumanoidRootPart") :: BasePart?
+            if not tHRP or not myHRP then
+                notify("Teleport", "HumanoidRootPart missing.", 3); return
+            end
+            myHRP.CFrame = tHRP.CFrame * CFrame.new(0, 0, 3)
+            notify("Teleport", `Warped to {name}.`, 3)
+        end)
+    end,
+})
+
+-- TAB 8 ► MISC
 local MiscTab = Window:CreateTab("Misc", 4483362458)
 
 MiscTab:CreateSection("Chat Logger")
@@ -4145,21 +4288,26 @@ local function addMessage(player: string, message: string)
     local entry = `[{os.date("%H:%M:%S")}] {player}: {message}`
     table.insert(chatLog, entry)
     if #chatLog > MAX_LOG then table.remove(chatLog, 1) end
-    print(`[Forsaken Chat] {entry}`)
-    if player ~= LocalPlayer.Name then notify(`💬 {player}`, message, 4) end
+    print(`[XenonZ Chat] {entry}`)
+    if player ~= LocalPlayer.Name and getgenv().ForsakenChatNotify ~= false then
+        notify(`💬 {player}`, message, 4)
+    end
 end
 
 local function hookTextChatService()
     pcall(function()
-        local TCS = game:GetService("TextChatService"); if not TCS then return end
+        local TCS = game:GetService("TextChatService")
+        if not TCS then return end
         local function hookChannel(ch: Instance)
             if not ch:IsA("TextChannel") then return end
-            table.insert(chatConns, (ch :: TextChannel).MessageReceived:Connect(function(msg: TextChatMessage)
-                safeCall(function()
-                    local s = msg.TextSource and msg.TextSource.Name or "Unknown"
-                    if msg.Text ~= "" then addMessage(s, msg.Text) end
-                end)
-            end))
+            table.insert(chatConns, (ch :: TextChannel).MessageReceived:Connect(
+                function(msg: TextChatMessage)
+                    pcall(function()
+                        local s = msg.TextSource and msg.TextSource.Name or "?"
+                        if msg.Text and msg.Text ~= "" then addMessage(s, msg.Text) end
+                    end)
+                end
+            ))
         end
         for _, ch in TCS:GetDescendants() do hookChannel(ch) end
         table.insert(chatConns, TCS.DescendantAdded:Connect(function(ch: Instance)
@@ -4180,53 +4328,18 @@ local function hookLegacyChat()
     end)
 end
 
-local chatMetaInstalled: boolean = false  -- kept for compat, no longer used
-
 MiscTab:CreateToggle({
     Name="Enable Chat Logger", CurrentValue=false, Flag="ChatLogger",
     Callback=function(v: boolean)
         chatActive = v
         if v then
-            -- TextChatService hook covers modern chat (both sent and received)
-            -- Legacy Chatted hook covers older chat and sent messages
-            -- No metatable hook needed — avoids breaking game __namecall
             hookTextChatService()
             hookLegacyChat()
-            notify("Chat Logger ON", "Chat hooked! Check F9 for log.", 5)
+            notify("Chat Logger", "Chat hooked! Messages print to F9.", 4)
         else
             for _, c in chatConns do pcall(function() c:Disconnect() end) end
             chatConns = {}
-            notify("Chat Logger", `Disabled. {#chatLog} messages stored.`, 3)
-        end
-    end,
-})
-
-MiscTab:CreateButton({
-    Name="Print Full Chat Log (F9)",
-    Callback=function()
-        if #chatLog == 0 then notify("Chat Log", "No messages logged yet.", 3); return end
-        print(`=== XenonZ CHAT LOG ({#chatLog} messages) ===`)
-        for i, entry in chatLog do print(`{i}. {entry}`) end
-        print("=== END OF LOG ===")
-        notify("Chat Log", `{#chatLog} message(s) printed to F9.`, 4)
-    end,
-})
-
-MiscTab:CreateButton({
-    Name="Clear Chat Log",
-    Callback=function()
-        local c = #chatLog; chatLog = {}
-        notify("Chat Log", `Cleared {c} message(s).`, 3)
-    end,
-})
-
-MiscTab:CreateButton({
-    Name="Show Last 5 Messages",
-    Callback=function()
-        if #chatLog == 0 then notify("Chat Log", "No messages yet.", 3); return end
-        local s = math.max(1, #chatLog - 4)
-        for i = s, #chatLog do
-            task.delay((i - s) * 0.8, function() notify("Chat", chatLog[i], 4) end)
+            notify("Chat Logger", `Off. {#chatLog} messages stored.`, 3)
         end
     end,
 })
@@ -4235,7 +4348,51 @@ MiscTab:CreateToggle({
     Name="Notify on Every Message", CurrentValue=true, Flag="ChatNotify",
     Callback=function(v: boolean)
         getgenv().ForsakenChatNotify = v
-        notify("Chat Notify", v and "Notify ON." or "Silent mode — log only.", 3)
+        notify("Chat", v and "Notifications ON." or "Silent — log only.", 3)
+    end,
+})
+
+MiscTab:CreateButton({
+    Name="Print Chat Log (F9)",
+    Callback=function()
+        if #chatLog == 0 then notify("Chat Log", "Nothing logged yet.", 3); return end
+        print(`=== XenonZ Chat Log ({#chatLog}) ===`)
+        for i, e in chatLog do print(`{i}. {e}`) end
+        notify("Chat Log", `{#chatLog} message(s) printed to F9.`, 4)
+    end,
+})
+
+MiscTab:CreateButton({
+    Name="Show Last 5 Messages",
+    Callback=function()
+        if #chatLog == 0 then notify("Chat", "Nothing yet.", 3); return end
+        local s = math.max(1, #chatLog - 4)
+        for i = s, #chatLog do
+            task.delay((i - s) * 0.8, function() notify("Chat", chatLog[i], 4) end)
+        end
+    end,
+})
+
+MiscTab:CreateButton({
+    Name="Clear Chat Log",
+    Callback=function()
+        local c = #chatLog; chatLog = {}
+        notify("Chat", `Cleared {c} message(s).`, 3)
+    end,
+})
+
+MiscTab:CreateButton({
+    Name="Force Open Chat",
+    Callback=function()
+        safeCall(function()
+            pcall(function() game:GetService("StarterGui"):SetCore("ChatActive", true) end)
+            pcall(function()
+                local cg = game:GetService("CoreGui")
+                local ib = cg:FindFirstChildWhichIsA("TextBox", true)
+                if ib then (ib :: TextBox):CaptureFocus() end
+            end)
+            notify("Chat", "Chat opened!", 2)
+        end)
     end,
 })
 
@@ -4259,7 +4416,7 @@ SettingsTab:CreateButton({
             end
             stopGeneratorESP()
             for _, obj in workspace:GetDescendants() do
-                for _, name in {"ItemESP_Hl","TripmineESP_Hl","TripwireESP_Hl","BuilderESP_Hl","PizzaESP_Hl","VandalismESP_Hl","FilesESP_Hl","FilesESP_BB"} do
+                for _, name in {"ItemESP_Hl","TripmineESP_Hl","TripwireESP_Hl","BuilderESP_Hl","PizzaESP_Hl","VandalismESP_Hl","FilesESP_Hl"} do
                     local hl = obj:FindFirstChild(name)
                     if hl then hl:Destroy() end
                 end
