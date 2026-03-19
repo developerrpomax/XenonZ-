@@ -70,7 +70,7 @@ end
 local Window = Rayfield:CreateWindow({
     Name="XenonZ", Icon=0,
     LoadingTitle="XenonZ is the best",
-    LoadingSubtitle="Delta X | Gloop Engine",
+    LoadingSubtitle="Best script eva",
     Theme="BloodMoon",
     DisableRayfieldPrompts=false,
     DisableBuildWarnings=true,
