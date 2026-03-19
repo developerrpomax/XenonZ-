@@ -2343,8 +2343,10 @@ local function getAbilityRemote(): RemoteEvent?
     return _cachedRemote
 end
 
--- forward declaration so fireAbility can reference it before the full module is built
-local Aimbot = {}
+-- forward declarations so fireAbility and doFire can reference both tables
+-- before their do-blocks fill them in
+local Aimbot    = {}
+local SilentAim = { snap = function() end }  -- stub replaced by do-block
 
 local function fireAbility(t: string)
     local rem = getAbilityRemote(); if not rem then return end
@@ -3711,6 +3713,7 @@ do
         skillActive = false
     end
     function Aimbot.setSkillHold(v: number) SKILL_HOLD = v end
+    function Aimbot.setTorsoHL(v: boolean)
         showTorsoHL = v
         if not v then removeTorsoHL() end
     end
@@ -3864,7 +3867,7 @@ AimbotTab:CreateLabel("Prediction leads torso using horizontal velocity × facto
 -- Method: hook the ability RemoteEvent FireServer call and
 -- swap the direction CFrame to point at the killer torso
 -- before the packet leaves the client.
-local SilentAim = {}
+-- SilentAim forward-declared above fireAbility; filling it in now
 do
     local enabled:      boolean   = false
     local fovRadius:    number    = 160
